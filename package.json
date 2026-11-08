@@ -1,7 +1,7 @@
 {
   "name": "sca-triage",
   "version": "1.0.0",
-  "description": "npm SCA scanner: rank dependency vulnerabilities by whether your code loads them, apply the smallest safe upgrades, and prove them with your project's tests. Ships with an INTENTIONALLY VULNERABLE demo app in lab/.",
+  "description": "npm SCA scanner: rank dependency vulnerabilities by whether your code loads them, apply the smallest safe upgrades, and prove them with your project's tests. The repository includes an INTENTIONALLY VULNERABLE demo app in lab/, which is not part of the published package.",
   "type": "module",
   "bin": {
     "sca-triage": "bin/sca-triage.js"
@@ -19,5 +19,5 @@
     "lab:scan": "node bin/sca-triage.js scan lab/vulnerable-app",
     "lab:plan": "node bin/sca-triage.js fix lab/vulnerable-app"
   },
-  "keywords": ["sca", "security", "npm", "vulnerability", "reachability", "supply-chain"]
+  "keywords": ["sca", "security", "npm", "vulnerability", "reachability", "supply-chain", "triage", "github-action", "sbom", "cyclonedx"]
 }
