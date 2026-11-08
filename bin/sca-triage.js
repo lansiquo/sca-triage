@@ -10,17 +10,19 @@ import { formatTable, formatMarkdown, displayName, plain } from '../src/report.j
 
 const HELP = `Usage:
   sca-triage scan [dir] [--json] [--markdown <file>] [--fail-on P1|P2|P3|none]
-  sca-triage fix  [dir] [--apply] [--min-priority P1|P2|P3] [--evidence <dir>] [--no-tests]
+  sca-triage plan [dir] [--min-priority P1|P2|P3]
+  sca-triage fix  [dir] [--min-priority P1|P2|P3] [--evidence <dir>] [--no-tests]
 
 scan   Find known vulnerabilities in the dependency tree locked in
        package-lock.json (v2/v3), ranked by severity and whether your code loads
        the package. Exit code 1 when a finding meets --fail-on (default P1), so
        it works as a CI gate. --json prints the full result; --markdown writes
        the findings table to a file.
-fix    Show the smallest safe upgrade for each finding (all priorities unless
-       --min-priority is set). With --apply, make the changes, run "npm test",
-       rescan, and write an evidence folder. Exit code 1 when the tests fail
-       after the upgrade.
+plan   Dry run: show the smallest safe upgrade for each finding (all
+       priorities unless --min-priority is set). Changes nothing.
+fix    Apply those upgrades, run "npm test", rescan, and write an evidence
+       folder. Exit code 1 when the tests fail after the upgrade.
+       "fix --dry-run" is the same as "plan".
 
 Priorities:
   P1  high/critical, and your code loads the package (directly or through a dependency)
@@ -35,7 +37,9 @@ function parseArgs(argv) {
   const opts = { _: [] };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a === '--json' || a === '--apply' || a === '--help' || a === '-h') opts[a.replace(/^-+/, '')] = true;
+    if (a === '--json' || a === '--help' || a === '-h') opts[a.replace(/^-+/, '')] = true;
+    else if (a === '--apply') opts.apply = true; // accepted for compatibility: fix always applies
+    else if (a === '--dry-run') opts.dryRun = true;
     else if (a === '--no-tests') opts.noTests = true;
     else if (['--fail-on', '--min-priority', '--evidence', '--markdown'].includes(a)) opts[a.slice(2)] = argv[++i];
     else if (a.startsWith('--')) throw new Error(`unknown option ${a}`);
@@ -66,9 +70,14 @@ async function main() {
     return fails ? 1 : 0;
   }
 
-  if (command === 'fix') {
+  if (command === 'plan' || command === 'fix') {
+    const dryRun = command === 'plan' || opts.dryRun;
+    if (command === 'plan' && (opts.apply || opts.evidence || opts.noTests)) {
+      throw new Error('plan only shows upgrades; use "sca-triage fix" to apply them');
+    }
+    if (opts.dryRun && opts.apply) throw new Error('--dry-run and --apply cannot be combined');
     const minPriority = opts['min-priority'] || 'P3';
-    if (!opts.apply) {
+    if (dryRun) {
       const result = await triage(dir);
       const plan = planFixes(result, { minPriority });
       if (!plan.actions.length) process.stdout.write('Nothing to upgrade.\n');
@@ -84,7 +93,7 @@ async function main() {
       }
       for (const f of plan.unfixable) process.stdout.write(plain(`${displayName(f)}@${f.version}: no fixed version published yet`) + '\n');
       for (const w of result.warnings || []) process.stderr.write(`warning: ${plain(w)}\n`);
-      process.stdout.write('\nDry run. Re-run with --apply to make these changes.\n');
+      process.stdout.write('\nDry run: nothing was changed. Run "sca-triage fix" to apply these upgrades.\n');
       return 0;
     }
     const evidenceDir = opts.evidence ? resolve(opts.evidence) : join(dir, 'evidence', new Date().toISOString().replace(/[:.]/g, '-'));
