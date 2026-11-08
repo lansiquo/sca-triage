@@ -51,7 +51,7 @@ async function main() {
   const [command, dirArg] = opts._;
   if (opts.help || opts.h || !command) {
     process.stdout.write(HELP);
-    return command ? 0 : 2;
+    return opts.help || opts.h ? 0 : 2; // asking for help succeeds; a missing command is a usage error
   }
   const dir = resolve(dirArg || '.');
 

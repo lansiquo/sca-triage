@@ -180,7 +180,7 @@ What counts as "loading" a package: `require()`, `require.resolve()`, static `im
 `export ... from`, dynamic `import()` (comments inside the parentheses are fine), functions made by
 `createRequire()`, and template literals with a static package name (``require(`pkg/${x}`)``).
 It scans `.js`, `.cjs`, `.mjs`, `.ts`, `.cts`, `.mts`, `.jsx`, `.tsx`, `.vue`, `.svelte` and `.astro`
-files up to 2 MB, plus extensionless scripts with a Node-style shebang (`node`, `tsx`, `ts-node`,
+files up to 2 MB, plus extensionless scripts with a Node-style shebang (`node`, `nodejs`, `tsx`, `ts-node`,
 `bun` or `deno`, like `bin/cli`). `node_modules` and `.git`
 are skipped everywhere; `dist`, `build`, `coverage`, `evidence` and `.next` only at the top of the
 project or a workspace, so a source folder that happens to be called `build` is still scanned.
