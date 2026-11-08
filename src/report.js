@@ -7,26 +7,57 @@ const LEVEL_LABEL = {
   'not-imported': 'not imported',
 };
 
-function upgradeText(f) {
+// Lockfile paths, package.json names and test output come from the scanned project,
+// so they are escaped before they reach Markdown (a PR comment or job summary) or a terminal.
+const CONTROL = /[\u0000-\u001f\u007f-\u009f]/g;
+
+export function escapeMarkdown(value) {
+  return String(value)
+    .replace(CONTROL, ' ')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/[\\`*_[\]!|~]/g, '\\$&');
+}
+
+// Inline code renders its content literally (no HTML, no links), so it is used as-is
+// when it can't break out of the span or the table cell; otherwise fall back to escaping.
+export function codeSpan(value) {
+  const s = String(value).replace(CONTROL, ' ');
+  return /[`|]/.test(s) ? escapeMarkdown(s) : `\`${s}\``;
+}
+
+// One line of terminal text: control characters (escape sequences, newlines) become spaces.
+export function plain(value) {
+  return String(value).replace(CONTROL, ' ');
+}
+
+// "foo (npm:lodash)" for an aliased install, "lodash" otherwise.
+export function displayName(f) {
+  return f.installedAs && f.installedAs !== f.package ? `${f.installedAs} (npm:${f.package})` : f.package;
+}
+
+function upgradeText(f, esc = plain) {
   if (!f.fix.target) return 'no fixed version published';
-  return `${f.version} -> ${f.fix.target}${f.fix.crossesMajor ? ' (major upgrade)' : ''}${f.direct ? '' : ' (override)'}`;
+  return `${esc(f.version)} -> ${f.fix.target}${f.fix.crossesMajor ? ' (major upgrade)' : ''}${f.direct ? '' : ' (override)'}`;
 }
 
 export function formatTable(result) {
   const lines = [];
   const s = result.summary;
-  lines.push(`${result.project}: ${result.packagesScanned} packages scanned, ${result.findings.length} vulnerable (P1: ${s.P1}, P2: ${s.P2}, P3: ${s.P3})`);
+  lines.push(`${plain(result.project)}: ${result.packagesScanned} packages scanned, ${result.findings.length} vulnerable (P1: ${s.P1}, P2: ${s.P2}, P3: ${s.P3})`);
+  for (const w of result.warnings || []) lines.push(`warning: ${plain(w)}`);
   if (!result.findings.length) {
     lines.push('No known vulnerabilities in the installed versions.');
     return lines.join('\n');
   }
   lines.push('');
   for (const f of result.findings) {
-    lines.push(`[${f.priority}] ${f.package}@${f.version}  ${f.severity.toUpperCase()}, ${f.advisories.length} advisor${f.advisories.length === 1 ? 'y' : 'ies'}`);
-    lines.push(`     reachability: ${LEVEL_LABEL[f.reachability]}${f.evidence.length ? ` (${f.evidence.slice(0, 2).join(', ')})` : ''}`);
-    if (!f.direct && f.via.length) lines.push(`     dependency of: ${f.via.join(', ')}`);
+    lines.push(`[${f.priority}] ${plain(displayName(f))}@${plain(f.version)}  ${plain(f.severity).toUpperCase()}, ${f.advisories.length} advisor${f.advisories.length === 1 ? 'y' : 'ies'}`);
+    lines.push(`     reachability: ${LEVEL_LABEL[f.reachability]}${f.evidence.length ? ` (${plain(f.evidence.slice(0, 2).join(', '))})` : ''}`);
+    if (!f.direct && f.via.length) lines.push(`     dependency of: ${plain(f.via.join(', '))}`);
     lines.push(`     fix: ${upgradeText(f)}`);
-    for (const a of f.advisories.slice(0, 3)) lines.push(`       - ${a.ghsa} ${a.severity}: ${a.title}`);
+    for (const a of f.advisories.slice(0, 3)) lines.push(`       - ${plain(a.ghsa)} ${plain(a.severity)}: ${plain(a.title)}`);
     if (f.advisories.length > 3) lines.push(`       - ...and ${f.advisories.length - 3} more`);
   }
   return lines.join('\n');
@@ -44,13 +75,13 @@ function failingTests(output = '') {
 
 export function formatMarkdown(before, after, extras = {}) {
   const row = (f) =>
-    `| ${f.priority} | \`${f.package}@${f.version}\` | ${f.severity} | ${f.advisories.length} | ${LEVEL_LABEL[f.reachability]} | ${upgradeText(f)} |`;
+    `| ${f.priority} | ${codeSpan(`${displayName(f)}@${f.version}`)} | ${escapeMarkdown(f.severity)} | ${f.advisories.length} | ${LEVEL_LABEL[f.reachability]} | ${upgradeText(f, escapeMarkdown)} |`;
   const table = (r) =>
     r.findings.length
       ? ['| Priority | Package | Severity | Advisories | Reachability | Fix |', '|---|---|---|---|---|---|', ...r.findings.map(row)].join('\n')
       : '_No known vulnerabilities in the installed versions._';
   const out = [
-    `# Remediation evidence: ${before.project}`,
+    `# Remediation evidence: ${escapeMarkdown(before.project)}`,
     '',
     `Generated ${new Date().toISOString()} by sca-triage. Advisory data: GitHub Advisory Database via the npm registry.`,
     '',
@@ -59,8 +90,10 @@ export function formatMarkdown(before, after, extras = {}) {
     '',
     table(before),
   ];
+  const warnings = [...new Set([...(before.warnings || []), ...(after?.warnings || [])])];
+  if (warnings.length) out.push('', '## Warnings', '', ...warnings.map((w) => `- ${escapeMarkdown(w)}`));
   if (extras.changes?.length) {
-    out.push('', '## Changes applied', '', ...extras.changes.map((c) => `- \`${c}\``));
+    out.push('', '## Changes applied', '', ...extras.changes.map((c) => `- ${codeSpan(c)}`));
   }
   if (extras.tests) {
     const line = (t) => `**${t.passed ? 'passed' : 'FAILED'}** (exit code ${t.code})`;
@@ -68,7 +101,7 @@ export function formatMarkdown(before, after, extras = {}) {
     if (extras.testsBefore) out.push(`| Before upgrade | ${line(extras.testsBefore)}${summarizeTap(extras.testsBefore.output)} | \`tests.before.txt\` |`);
     out.push(`| After upgrade | ${line(extras.tests)}${summarizeTap(extras.tests.output)} | \`tests.after.txt\` |`);
     const failedBefore = failingTests(extras.testsBefore?.output);
-    if (failedBefore.length) out.push('', 'Failing before the upgrade:', '', ...failedBefore.map((n) => `- ${n}`));
+    if (failedBefore.length) out.push('', 'Failing before the upgrade:', '', ...failedBefore.map((n) => `- ${escapeMarkdown(n)}`));
   } else if (after) {
     // A fix report always says whether the tests checked the upgrade. Scan reports (no "after") skip this.
     out.push('', '## Project tests (`npm test`)', '', `**Not run — changes applied but UNVERIFIED** (${extras.testsSkipped || 'reason not recorded'}).`);
