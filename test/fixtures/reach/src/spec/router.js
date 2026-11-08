@@ -1,0 +1,1 @@
+require('in-src-spec');

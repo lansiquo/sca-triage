@@ -1,0 +1,3 @@
+#!/usr/bin/env node
+// Fixture CLI without an extension.
+require("from-bin");

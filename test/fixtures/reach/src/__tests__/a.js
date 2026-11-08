@@ -1,0 +1,1 @@
+require('in-jest-tests');
