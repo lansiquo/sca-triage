@@ -102,7 +102,11 @@ Apply the fixes to a fresh copy so the lab keeps its vulnerable starting point:
 rm -rf /tmp/lab-copy /tmp/lab-evidence
 cp -r lab/vulnerable-app /tmp/lab-copy
 node bin/sca-triage.js fix /tmp/lab-copy --apply --evidence /tmp/lab-evidence
+node bin/sca-triage.js scan /tmp/lab-copy   # rescan the fixed copy: 0 vulnerable, gate passes
 ```
+
+The report is saved to `/tmp/lab-evidence/REPORT.md`. Scanning `lab/vulnerable-app` again still shows
+the original findings.
 
 Lab scan, condensed to one line per finding (counts and versions follow the advisory database):
 
