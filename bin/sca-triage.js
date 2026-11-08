@@ -12,16 +12,23 @@ const HELP = `Usage:
   sca-triage scan [dir] [--json] [--markdown <file>] [--fail-on P1|P2|P3|none]
   sca-triage fix  [dir] [--apply] [--min-priority P1|P2|P3] [--evidence <dir>] [--no-tests]
 
-scan   Find known vulnerabilities in the installed dependency tree, ranked by
-       severity and whether your code imports the package. Exit code 1 when a
-       finding meets --fail-on (default P1), so it works as a CI gate.
-fix    Show the smallest safe upgrade for each finding. With --apply, make the
-       changes, run "npm test", rescan, and write an evidence folder.
+scan   Find known vulnerabilities in the dependency tree locked in
+       package-lock.json (v2/v3), ranked by severity and whether your code loads
+       the package. Exit code 1 when a finding meets --fail-on (default P1), so
+       it works as a CI gate. --json prints the full result; --markdown writes
+       the findings table to a file.
+fix    Show the smallest safe upgrade for each finding (all priorities unless
+       --min-priority is set). With --apply, make the changes, run "npm test",
+       rescan, and write an evidence folder. Exit code 1 when the tests fail
+       after the upgrade.
 
 Priorities:
   P1  high/critical, and your code loads the package (directly or through a dependency)
   P2  high/critical but not loaded at runtime, or moderate and loaded
   P3  everything else
+
+Exit code 2 means a usage or input error (bad option, missing lockfile, registry error).
+Advisories come from registry.npmjs.org; set SCA_TRIAGE_REGISTRY to use an https:// mirror.
 `;
 
 function parseArgs(argv) {
@@ -44,7 +51,7 @@ async function main() {
   const [command, dirArg] = opts._;
   if (opts.help || opts.h || !command) {
     process.stdout.write(HELP);
-    return command ? 0 : 2;
+    return opts.help || opts.h ? 0 : 2; // asking for help succeeds; a missing command is a usage error
   }
   const dir = resolve(dirArg || '.');
 

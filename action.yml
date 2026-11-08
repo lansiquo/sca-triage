@@ -1,11 +1,11 @@
 name: sca-triage
-description: "npm SCA scanner: fail the build on vulnerable dependencies your code actually loads, ranked by severity and reachability."
+description: "npm SCA gate: rank vulnerable dependencies by severity and whether your code loads them, and fail the build at the priority you choose (P1 by default)."
 branding:
   icon: shield
   color: red
 inputs:
   path:
-    description: Directory containing package.json and package-lock.json
+    description: Directory containing package.json and package-lock.json (v2 or v3)
     default: .
   fail-on:
     description: Lowest priority that fails the build (P1, P2, P3 or none)

@@ -1,19 +1,19 @@
 # sca-triage
 
 `sca-triage` is a dependency-free npm SCA scanner, run from the command line or as a GitHub Action. It finds
-known vulnerabilities in your installed dependency tree, **ranks them by whether your code
-actually loads the vulnerable package**, applies the smallest safe upgrade, and proves the result
-with your own tests, with an evidence folder you can hand to an auditor.
+known vulnerabilities in the dependency tree locked in `package-lock.json`, **ranks them by whether
+your code actually loads the vulnerable package**, applies the smallest safe upgrades, and proves the
+result with your project's own tests, with an evidence folder you can hand to an auditor.
 
 **Status: v1.0, functional end-to-end npm SCA scanner and lab.**
 Its SAST companion, [sast-triage](https://github.com/lansiquo/sast-triage), reviews pull requests with Semgrep, labels each finding new or pre-existing, and ranks it P1–P3 the same way.
 
-The implemented workflow scans npm dependencies, prioritizes findings using import evidence,
-applies proposed upgrades, runs the project’s tests, rescans and saves remediation evidence.
-The [CI lab gate](.github/workflows/ci.yml) exercises the vulnerable baseline and remediated copy.
-Functional describes this local/CI workflow; the [scope and limits](#limits) still apply.
-The [portfolio browser demo](https://dotrobin.dev/demos/sca.html) is a recorded replay, separate
-from the working CLI and GitHub Action.
+The workflow scans npm dependencies, ranks findings by severity and import evidence, applies the
+upgrades, runs the project’s tests, rescans and saves remediation evidence. The
+[CI lab gate](.github/workflows/ci.yml) runs it end to end on the vulnerable lab app on every push to
+`main` and every pull request. [Scope and limits](#scope-and-limits) explains what each signal means.
+The [portfolio browser demo](https://dotrobin.dev/demos/sca.html) replays one recorded run; the CLI
+and GitHub Action here are the working tool.
 
 > [!WARNING]
 > **This repository contains an intentionally vulnerable application.**
@@ -40,7 +40,9 @@ what matters. `sca-triage` automates that triage:
 
 ## Quick start
 
-Requires Node.js 20 or newer and network access to `registry.npmjs.org`.
+Requires Node.js 20 or newer (CI tests Node 20 and 22) and network access to `registry.npmjs.org`
+(or the registry set in [`SCA_TRIAGE_REGISTRY`](#advisory-source)). A scan reads `package.json` and
+`package-lock.json`, so it doesn't need `node_modules`; `fix --apply` uses npm to install the upgrades.
 
 ```bash
 git clone https://github.com/lansiquo/sca-triage.git
@@ -63,7 +65,7 @@ On your own project:
 node /path/to/sca-triage/bin/sca-triage.js scan .
 ```
 
-## What it found in the lab (real output)
+## What it found in the lab (real output, advisory lines trimmed)
 
 ```text
 intentionally-vulnerable-export-job: 33 packages scanned, 4 vulnerable (P1: 3, P2: 1, P3: 0)
@@ -98,7 +100,7 @@ The functional tests pass on both versions. That's the point of the lab: compati
 alone don't catch the vulnerability, so the lab adds a security test for the one advisory it
 demonstrates end to end (minimist, GHSA-xvch-5gv4-984h).
 
-Exact counts and fix versions depend on the advisory database on the day you run it.
+Exact counts and fix versions follow the advisory database at the time you run it.
 
 ## What it found on a real project (OWASP NodeGoat)
 
@@ -131,23 +133,37 @@ sca-triage scan [dir] [--json] [--markdown <file>] [--fail-on P1|P2|P3|none]
 sca-triage fix  [dir] [--apply] [--min-priority P1|P2|P3] [--evidence <dir>] [--no-tests]
 ```
 
-- **`scan`** exits with code 1 when a finding meets `--fail-on` (default `P1`), so it works as a CI gate.
-- **`fix`** is a dry run unless you pass `--apply`. With `--apply` it:
+- **`scan`** prints the ranked findings and exits with code 1 when a finding meets `--fail-on`
+  (default `P1`), so it works as a CI gate. `--json` prints the full result instead (each finding
+  carries `package`, `installedAs`, `version`, `reachability`, `evidence`, `priority`, `advisories` and
+  `fix`, plus a top-level `warnings` list), and `--markdown <file>` also writes the findings table as Markdown.
+- **`fix`** is a dry run unless you pass `--apply`. It covers every priority by default; `--min-priority P1`
+  limits it to P1 findings. With `--apply` it:
   1. runs `npm test` to record a baseline,
   2. pins direct dependencies to the safe version (`npm install pkg@x.y.z --save-exact --ignore-scripts`,
-     with `--workspace <path>` for a dependency a workspace declares; an alias keeps its alias,
-     e.g. `npm install foo@npm:lodash@4.17.21`),
+     keeping each in `dependencies` or `devDependencies`, with `--workspace <path>` for a dependency a
+     workspace declares; an alias keeps its alias, e.g. `npm install foo@npm:lodash@4.17.21`),
   3. adds npm `overrides` for vulnerable transitive dependencies. Each vulnerable copy gets the
      smallest safe version on its own release line, so a 1.x copy and a 2.x copy aren't forced onto
-     one version. A plain `"pkg": "x.y.z"` override is used only when every installed copy wants the
-     same version and none is a direct dependency; otherwise the override is scoped to the packages
-     that require each copy (`"parent": { "pkg": "x.y.z" }`), which npm accepts alongside a direct pin,
+     one version. A plain `"pkg": "x.y.z"` override is used only when every installed copy is being
+     upgraded to the same version and none is a direct dependency; otherwise the override is scoped to
+     the packages that require each copy (`"parent": { "pkg": "x.y.z" }`), which npm accepts alongside
+     a direct pin,
   4. runs `npm test` again and rescans,
-  5. writes `REPORT.md`, `before.json`, `after.json`, both lockfiles, both test logs and a CycloneDX SBOM to the evidence folder.
+  5. writes `REPORT.md`, `before.json`, `after.json`, both lockfiles and both test logs to the evidence
+     folder, plus a CycloneDX SBOM (`sbom.cdx.json`) from `npm sbom`.
 
   It exits with code 1 if the tests fail after the upgrade, so you know not to merge it.
   If the tests can't run (no `test` script, or `--no-tests`), it still exits 0, but the output
   and `REPORT.md` mark the changes as **unverified**.
+
+### Exit codes
+
+| Code | `scan` | `fix` |
+|---|---|---|
+| 0 | No finding meets `--fail-on` | Dry run, or upgrades applied and tests passed (or marked unverified) |
+| 1 | A finding meets `--fail-on` | Tests failed after the upgrade |
+| 2 | Usage or input error: unknown option or command, missing `package.json` or `package-lock.json`, a v1 lockfile, an invalid `SCA_TRIAGE_REGISTRY`, or a registry error or unexpected response | Same, plus a failed `npm install` |
 
 ### Priorities
 
@@ -164,7 +180,8 @@ What counts as "loading" a package: `require()`, `require.resolve()`, static `im
 `export ... from`, dynamic `import()` (comments inside the parentheses are fine), functions made by
 `createRequire()`, and template literals with a static package name (``require(`pkg/${x}`)``).
 It scans `.js`, `.cjs`, `.mjs`, `.ts`, `.cts`, `.mts`, `.jsx`, `.tsx`, `.vue`, `.svelte` and `.astro`
-files, plus extensionless scripts with a `node` shebang (like `bin/cli`). `node_modules` and `.git`
+files up to 2 MB, plus extensionless scripts with a Node-style shebang (`node`, `nodejs`, `tsx`, `ts-node`,
+`bun` or `deno`, like `bin/cli`). `node_modules` and `.git`
 are skipped everywhere; `dist`, `build`, `coverage`, `evidence` and `.next` only at the top of the
 project or a workspace, so a source folder that happens to be called `build` is still scanned.
 Test code is `test/`, `tests/` or `spec/` at the top of the project or a workspace, any `__tests__/`
@@ -177,9 +194,13 @@ the root `package.json` and from every workspace package, and use installed name
 If an advisory's version range can't be parsed, the installed version is treated as vulnerable and
 the scan prints a warning, rather than dropping the advisory or aborting the scan.
 
-The advisory source can be changed with `SCA_TRIAGE_REGISTRY` (for a registry mirror). It must be
-`https://`; plain `http://` is accepted only for `localhost`. A response that isn't the expected
-shape is an error (exit code 2), never "no vulnerabilities".
+### Advisory source
+
+Advisories come from the GitHub Advisory Database through the npm registry's bulk advisory API, the
+same data `npm audit` uses. `SCA_TRIAGE_REGISTRY` points the tool at a registry mirror. It must be
+`https://`; plain `http://` is accepted only for this machine (`localhost`, `127.0.0.1`, `[::1]`),
+and the URL can't contain credentials. A response that isn't the expected shape, including an
+advisory with no version range, is an error (exit code 2), never "no vulnerabilities".
 
 ## Use it in GitHub Actions
 
@@ -188,18 +209,22 @@ shape is an error (exit code 2), never "no vulnerabilities".
 - uses: actions/setup-node@v4
   with:
     node-version: 22
-- run: npm ci --ignore-scripts
 - uses: lansiquo/sca-triage@v1
   with:
     path: .
     fail-on: P1
 ```
 
+Inputs: `path` (the directory with `package.json` and `package-lock.json`, default `.`) and `fail-on`
+(`P1`, `P2`, `P3` or `none`, default `P1`). The step fails when the gate fails, and the findings table
+is added to the job summary. The scan reads the lockfile, so the job doesn't need to install
+dependencies first.
+
 Pin `@v1` to get v1 fixes automatically, or pin a full commit SHA for the strictest supply-chain safety.
 
-The findings table is added to the job summary. This repository's own [CI](.github/workflows/ci.yml)
-runs the tool against the lab app on every push: the gate must **fail** on the vulnerable
-baseline and **pass** after remediation, and the evidence folder is uploaded as an artifact.
+This repository's own [CI](.github/workflows/ci.yml) runs the tool against the lab app on every push
+to `main` and every pull request: the gate must **fail** on the vulnerable baseline and **pass** after
+remediation, and the evidence folder is uploaded as an artifact.
 
 ## Why I built it this way
 
@@ -209,15 +234,17 @@ that actually changed my decision was "does our code even load this?" — so tha
 tool. The reachability check is deliberately simple: it looks for imports, not a call graph. I'd rather
 ship an honest "lower priority" signal than a clever one that quietly lies, so reachability only
 down-ranks findings, it never hides them. Keeping the tool dependency-free was a principle too — a thing
-that scans dependencies shouldn't drag in its own. The parts I'd tackle next are an OSV data source for
-other ecosystems and EPSS/KEV scoring so the ranking knows what's actually being exploited in the wild.
+that scans dependencies shouldn't drag in its own. Natural extensions are an OSV data source for other
+ecosystems and EPSS/KEV scoring, so the ranking also weighs what's being exploited in the wild.
 
-## Limits
+## Scope and limits
 
 - **Reachability is import-level.** "Imported" means your code loads the package, not that the
-  vulnerable function is proven to run. It doesn't build a call graph, so treat P2/P3 as
-  "lower priority", not "safe".
-- **npm only,** using `package-lock.json` v2 or v3. Other ecosystems aren't supported yet.
+  vulnerable function is proven to run. It ranks findings and never hides them, so treat P2/P3 as
+  "lower priority", not "safe", and pair it with code review or call-graph analysis when you need
+  proof of exploitability.
+- **Covers npm projects** with `package-lock.json` v2 or v3 (npm 7 or newer). A v1 lockfile is
+  rejected with a message to regenerate it.
 - **Results reflect the advisory database at scan time.** Zero findings is not a security certification.
 - **Major upgrades are applied when no same-major fix exists,** and flagged. Below 1.0.0 a minor
   bump (0.9 → 0.10) counts as major, as npm's caret ranges treat it. The scanned project's
