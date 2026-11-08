@@ -1,0 +1,1 @@
+{ "name": "alias-fixture", "version": "1.0.0", "private": true, "dependencies": { "foo": "npm:lodash@4.17.20" } }

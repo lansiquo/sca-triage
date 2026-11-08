@@ -4,13 +4,20 @@
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { compare } from './semver.js';
+import { releaseLine } from './semver.js';
 import { priorityRank, triage } from './triage.js';
 import { formatMarkdown } from './report.js';
 
 const NPM = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 
+// Arguments built from lockfile and registry data. Refuse anything outside the
+// characters package names, versions and workspace paths use, so a crafted lockfile
+// can't smuggle a flag or (with Windows' shell) a command into the npm call.
+const SAFE_ARG = /^(?:--[a-z-]+|[A-Za-z0-9@.][A-Za-z0-9@._/:+~^=-]*)$/;
+
 function run(cmd, args, cwd) {
+  const bad = args.find((a) => !SAFE_ARG.test(a));
+  if (bad !== undefined) throw new Error(`refusing to run npm with unexpected argument ${JSON.stringify(bad)}`);
   const res = spawnSync(cmd, args, {
     cwd,
     encoding: 'utf8',
@@ -20,23 +27,111 @@ function run(cmd, args, cwd) {
   return { code: res.status ?? 1, output: `${res.stdout || ''}${res.stderr || ''}` };
 }
 
-// Group findings into one action per package. Direct dependencies get a pinned
-// upgrade; transitive ones get an npm "overrides" entry.
+// The spec npm should install for a copy: "1.2.5", or "npm:lodash@4.17.21" for an alias.
+function installSpec(f, target) {
+  return f.installedAs && f.installedAs !== f.package ? `npm:${f.package}@${target}` : target;
+}
+
+// Plan the upgrades. Each vulnerable copy gets its own smallest safe target (on its own
+// release line when one exists), and copies that share a target are grouped into one
+// action. An action carries:
+//   pins       - manifests (the root "" or a workspace path) that declare the package
+//                directly: `npm install name@target --save-exact [-w workspace]`
+//   overrides  - npm "overrides" entries for the copies nothing declares directly.
+//                One global entry when that is unambiguous; otherwise entries scoped to
+//                the packages that require each copy ({ parent: { name: spec } }), so
+//                a global override never pins every copy (and a direct dependency, which
+//                npm refuses) to one version.
 export function planFixes(result, { minPriority = 'P3' } = {}) {
   const threshold = priorityRank(minPriority);
-  const byName = new Map();
-  for (const f of result.findings) {
-    if (priorityRank(f.priority) < threshold || !f.fix.target) continue;
-    const cur = byName.get(f.package) || { package: f.package, target: f.fix.target, direct: false, dev: true, crossesMajor: false, from: [] };
-    if (compare(f.fix.target, cur.target) > 0) cur.target = f.fix.target;
-    cur.direct ||= f.direct;
-    cur.dev &&= f.devOnly;
-    cur.crossesMajor ||= f.fix.crossesMajor;
-    cur.from.push(f.version);
-    byName.set(f.package, cur);
+  const selected = result.findings.filter((f) => priorityRank(f.priority) >= threshold);
+  const unfixable = selected.filter((f) => !f.fix.target);
+  const fixable = selected.filter((f) => f.fix.target);
+
+  const byName = new Map(); // installed name -> findings
+  for (const f of fixable) {
+    const name = f.installedAs || f.package;
+    if (!byName.has(name)) byName.set(name, []);
+    byName.get(name).push(f);
   }
-  const unfixable = result.findings.filter((f) => priorityRank(f.priority) >= threshold && !f.fix.target);
-  return { actions: [...byName.values()], unfixable };
+
+  const actions = [];
+  for (const [name, copies] of byName) {
+    const targets = new Map(); // target -> copies
+    for (const f of copies) {
+      if (!targets.has(f.fix.target)) targets.set(f.fix.target, []);
+      targets.get(f.fix.target).push(f);
+    }
+    const anyDirect = copies.some((f) => f.direct);
+    // A global override rewrites every copy of the package, so it is used only when every
+    // installed copy is in this plan, they all want the same target, and none is a direct
+    // dependency (npm rejects an override that conflicts with a direct dependency).
+    const installed = Math.max(...copies.map((f) => f.copiesInstalled ?? copies.length));
+    const globalOverride = targets.size === 1 && !anyDirect && copies.length >= installed;
+    for (const [target, group] of targets) {
+      const spec = installSpec(group[0], target);
+      const action = {
+        package: group[0].package,
+        name,
+        target,
+        spec,
+        direct: false,
+        dev: true,
+        crossesMajor: false,
+        from: [],
+        pins: [],
+        overrides: [],
+      };
+      for (const f of group) {
+        action.from.push(f.version);
+        action.crossesMajor ||= releaseLine(f.version) !== releaseLine(target);
+        action.dev &&= Boolean(f.devOnly);
+        if (f.direct) {
+          action.direct = true;
+          for (const d of f.declaredBy || [{ owner: '', kind: f.devOnly ? 'dev' : 'prod' }]) {
+            if (!action.pins.some((p) => p.owner === d.owner)) action.pins.push({ owner: d.owner, dev: d.kind === 'dev' });
+          }
+        } else if (globalOverride) {
+          if (!action.overrides.length) action.overrides.push({ scope: null, name, spec });
+        } else {
+          // Scope to the packages that require this copy; fall back to the folder it is nested in.
+          let parents = (f.requiredBy || []).filter((p) => p !== name);
+          if (!parents.length) {
+            const i = f.path.lastIndexOf('/node_modules/');
+            if (i !== -1) parents = [f.path.slice(0, i).split('node_modules/').pop()];
+          }
+          for (const scope of parents) {
+            if (!action.overrides.some((o) => o.scope === scope)) action.overrides.push({ scope, name, spec });
+          }
+        }
+      }
+      actions.push(action);
+    }
+  }
+  return { actions, unfixable };
+}
+
+// Merge planned overrides into a package.json "overrides" object, following npm's
+// syntax: { name: spec } globally, or { parent: { name: spec } } scoped to a parent.
+// A parent that already has a plain override keeps it under ".".
+export function applyOverrides(existing, actions) {
+  const overrides = existing && typeof existing === 'object' && !Array.isArray(existing) ? existing : {};
+  const changes = [];
+  for (const a of actions) {
+    for (const o of a.overrides) {
+      if (o.scope === null) {
+        overrides[o.name] = o.spec;
+        changes.push(`package.json overrides: "${o.name}": "${o.spec}"`);
+      } else {
+        const cur = Object.hasOwn(overrides, o.scope) ? overrides[o.scope] : undefined;
+        const scoped = cur && typeof cur === 'object' ? cur : cur === undefined ? {} : { '.': cur };
+        scoped[o.name] = o.spec;
+        overrides[o.scope] = scoped;
+        changes.push(`package.json overrides: "${o.scope}" > "${o.name}": "${o.spec}"`);
+      }
+    }
+  }
+  return { overrides, changes };
 }
 
 export async function applyFixes(projectDir, { minPriority = 'P3', evidenceDir, runTests = true, lookups } = {}) {
@@ -59,23 +154,23 @@ export async function applyFixes(projectDir, { minPriority = 'P3', evidenceDir, 
   // 0) Baseline test run, so the evidence shows what changed.
   const testsBefore = testsEnabled ? runProjectTests() : null;
 
-  // 1) Direct dependencies: pin the safe version.
-  for (const a of plan.actions.filter((x) => x.direct)) {
-    const args = ['install', `${a.package}@${a.target}`, '--save-exact', '--ignore-scripts', a.dev ? '--save-dev' : '--save-prod'];
-    const r = run(NPM, args, projectDir);
-    if (r.code !== 0) throw new Error(`npm ${args.join(' ')} failed:\n${r.output}`);
-    changes.push(`npm ${args.join(' ')}`);
+  // 1) Direct dependencies: pin the safe version in each manifest that declares it.
+  for (const a of plan.actions) {
+    for (const pin of a.pins) {
+      const args = ['install', `${a.name}@${a.spec}`, '--save-exact', '--ignore-scripts', pin.dev ? '--save-dev' : '--save-prod'];
+      if (pin.owner) args.push('--workspace', pin.owner);
+      const r = run(NPM, args, projectDir);
+      if (r.code !== 0) throw new Error(`npm ${args.join(' ')} failed:\n${r.output}`);
+      changes.push(`npm ${args.join(' ')}`);
+    }
   }
 
-  // 2) Transitive dependencies: npm overrides, then one install to apply them.
-  const transitive = plan.actions.filter((x) => !x.direct);
-  if (transitive.length) {
+  // 2) Copies nothing declares directly: npm overrides, then one install to apply them.
+  if (plan.actions.some((a) => a.overrides.length)) {
     const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
-    pkg.overrides ||= {};
-    for (const a of transitive) {
-      pkg.overrides[a.package] = a.target;
-      changes.push(`package.json overrides: "${a.package}": "${a.target}"`);
-    }
+    const merged = applyOverrides(pkg.overrides, plan.actions);
+    pkg.overrides = merged.overrides;
+    changes.push(...merged.changes);
     writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n');
     const r = run(NPM, ['install', '--ignore-scripts'], projectDir);
     if (r.code !== 0) throw new Error(`npm install (overrides) failed:\n${r.output}`);

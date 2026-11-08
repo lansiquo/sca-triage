@@ -134,8 +134,14 @@ sca-triage fix  [dir] [--apply] [--min-priority P1|P2|P3] [--evidence <dir>] [--
 - **`scan`** exits with code 1 when a finding meets `--fail-on` (default `P1`), so it works as a CI gate.
 - **`fix`** is a dry run unless you pass `--apply`. With `--apply` it:
   1. runs `npm test` to record a baseline,
-  2. pins direct dependencies to the safe version (`npm install pkg@x.y.z --save-exact --ignore-scripts`),
-  3. adds npm `overrides` for vulnerable transitive dependencies,
+  2. pins direct dependencies to the safe version (`npm install pkg@x.y.z --save-exact --ignore-scripts`,
+     with `--workspace <path>` for a dependency a workspace declares; an alias keeps its alias,
+     e.g. `npm install foo@npm:lodash@4.17.21`),
+  3. adds npm `overrides` for vulnerable transitive dependencies. Each vulnerable copy gets the
+     smallest safe version on its own release line, so a 1.x copy and a 2.x copy aren't forced onto
+     one version. A plain `"pkg": "x.y.z"` override is used only when every installed copy wants the
+     same version and none is a direct dependency; otherwise the override is scoped to the packages
+     that require each copy (`"parent": { "pkg": "x.y.z" }`), which npm accepts alongside a direct pin,
   4. runs `npm test` again and rescans,
   5. writes `REPORT.md`, `before.json`, `after.json`, both lockfiles, both test logs and a CycloneDX SBOM to the evidence folder.
 
@@ -153,6 +159,27 @@ sca-triage fix  [dir] [--apply] [--min-priority P1|P2|P3] [--evidence <dir>] [--
 
 Reachability levels: `imported` (your runtime code requires or imports it), `via-imported`
 (an imported dependency pulls it in), `test-only`, and `not-imported`.
+
+What counts as "loading" a package: `require()`, `require.resolve()`, static `import` and
+`export ... from`, dynamic `import()` (comments inside the parentheses are fine), functions made by
+`createRequire()`, and template literals with a static package name (``require(`pkg/${x}`)``).
+It scans `.js`, `.cjs`, `.mjs`, `.ts`, `.cts`, `.mts`, `.jsx`, `.tsx`, `.vue`, `.svelte` and `.astro`
+files, plus extensionless scripts with a `node` shebang (like `bin/cli`). `node_modules` and `.git`
+are skipped everywhere; `dist`, `build`, `coverage`, `evidence` and `.next` only at the top of the
+project or a workspace, so a source folder that happens to be called `build` is still scanned.
+Test code is `test/`, `tests/` or `spec/` at the top of the project or a workspace, any `__tests__/`
+folder, and `*.test.*` / `*.spec.*` files. Symlinks are followed only inside the project.
+
+Dependency chains follow `dependencies`, `optionalDependencies` and `peerDependencies`, start from
+the root `package.json` and from every workspace package, and use installed names, so an alias
+(`"foo": "npm:lodash@..."`) is matched to `require('foo')` and reported as `foo (npm:lodash)`.
+
+If an advisory's version range can't be parsed, the installed version is treated as vulnerable and
+the scan prints a warning, rather than dropping the advisory or aborting the scan.
+
+The advisory source can be changed with `SCA_TRIAGE_REGISTRY` (for a registry mirror). It must be
+`https://`; plain `http://` is accepted only for `localhost`. A response that isn't the expected
+shape is an error (exit code 2), never "no vulnerabilities".
 
 ## Use it in GitHub Actions
 
@@ -192,7 +219,8 @@ other ecosystems and EPSS/KEV scoring so the ranking knows what's actually being
   "lower priority", not "safe".
 - **npm only,** using `package-lock.json` v2 or v3. Other ecosystems aren't supported yet.
 - **Results reflect the advisory database at scan time.** Zero findings is not a security certification.
-- **Major upgrades are applied when no same-major fix exists,** and flagged. The scanned project's
+- **Major upgrades are applied when no same-major fix exists,** and flagged. Below 1.0.0 a minor
+  bump (0.9 → 0.10) counts as major, as npm's caret ranges treat it. The scanned project's
   own tests (`npm test`) are the safety net, so the verdict on an upgrade is only as good as that
   project's test suite. If it has no tests, the upgrade is reported as unverified.
 

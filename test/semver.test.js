@@ -27,3 +27,11 @@ test('rejects range syntax it does not understand instead of guessing', () => {
 test('sorts and drops invalid versions', () => {
   assert.deepEqual(sortVersions(['1.10.0', 'garbage', '1.2.0', '1.9.3']), ['1.2.0', '1.9.3', '1.10.0']);
 });
+
+test('release lines follow npm caret rules below 1.0.0', async () => {
+  const { releaseLine } = await import('../src/semver.js');
+  assert.equal(releaseLine('2.3.4'), '2');
+  assert.equal(releaseLine('0.9.1'), '0.9');
+  assert.equal(releaseLine('0.0.4'), '0.0.4');
+  assert.equal(releaseLine('garbage'), null);
+});

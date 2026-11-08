@@ -4,7 +4,19 @@
 import { loadProject } from './lockfile.js';
 import { fetchAdvisories, fetchVersions, severityRank } from './advisories.js';
 import { findImports, classify, REACHABILITY_RANK } from './reachability.js';
-import { satisfies, compare, parse, isPrerelease, sortVersions } from './semver.js';
+import { satisfies, compare, parse, isPrerelease, sortVersions, releaseLine } from './semver.js';
+
+// satisfies(), but a range or version this tool can't parse counts as a match, with a
+// warning: an advisory we can't read must not turn into "not vulnerable".
+export function affects(version, range, warnings, context = '') {
+  try {
+    return satisfies(version, range);
+  } catch (err) {
+    const msg = `${context ? `${context}: ` : ''}${err.message}; treating it as vulnerable`;
+    if (warnings && !warnings.includes(msg)) warnings.push(msg);
+    return true;
+  }
+}
 
 // P1: high/critical and the code loads it. Fix now.
 // P2: high/critical but not loaded at runtime, or moderate and loaded. Schedule it.
@@ -24,40 +36,58 @@ export function priorityRank(p) {
 }
 
 // Smallest published, non-prerelease version above `current` that no advisory covers.
-// Prefers staying on the same major version, since that is least likely to break callers.
-export function pickSafeVersion(current, versions, advisories) {
+// Prefers staying on the same release line (same major, or same 0.minor below 1.0.0),
+// since that is least likely to break callers. `crossesMajor` means the target is on
+// another line: a breaking upgrade under npm's caret rules.
+export function pickSafeVersion(current, versions, advisories, warnings) {
   const cur = parse(current);
+  if (!cur) return { target: null, crossesMajor: false };
   const candidates = sortVersions(versions).filter(
-    (v) => !isPrerelease(v) && compare(v, current) > 0 && !advisories.some((a) => satisfies(v, a.vulnerableVersions)),
+    (v) => !isPrerelease(v) && compare(v, cur) > 0 && !advisories.some((a) => affects(v, a.vulnerableVersions, warnings, a.ghsa)),
   );
   if (!candidates.length) return { target: null, crossesMajor: false };
-  const sameMajor = candidates.find((v) => parse(v).major === cur.major);
-  const target = sameMajor || candidates[0];
-  return { target, crossesMajor: parse(target).major !== cur.major };
+  const line = releaseLine(cur);
+  const sameLine = candidates.find((v) => releaseLine(v) === line);
+  const target = sameLine || candidates[0];
+  return { target, crossesMajor: releaseLine(target) !== line };
 }
 
 export async function triage(projectDir, { advisoryLookup = fetchAdvisories, versionLookup = fetchVersions } = {}) {
   const project = loadProject(projectDir);
-  const imports = findImports(projectDir);
-  const advisoriesByName = await advisoryLookup(project.installs);
+  const imports = findImports(projectDir, { workspaces: project.workspaces });
+  // Advisories and versions are looked up by the real package name ("lodash" for
+  // "foo": "npm:lodash@..."); reachability uses the installed name.
+  const advisoriesByName = await advisoryLookup(project.installs.map((i) => ({ name: i.realName, version: i.version })));
+  const advisoriesFor = (name) =>
+    advisoriesByName instanceof Map
+      ? advisoriesByName.get(name) || []
+      : (advisoriesByName && Object.hasOwn(advisoriesByName, name) && advisoriesByName[name]) || [];
 
+  const copiesByName = new Map();
+  for (const i of project.installs) copiesByName.set(i.name, (copiesByName.get(i.name) || 0) + 1);
+
+  const warnings = [];
   const findings = [];
   const versionCache = new Map();
   for (const install of project.installs) {
-    const all = advisoriesByName[install.name] || [];
-    const affecting = all.filter((a) => satisfies(install.version, a.vulnerableVersions));
+    const all = advisoriesFor(install.realName);
+    const affecting = all.filter((a) => affects(install.version, a.vulnerableVersions, warnings, `${a.ghsa} (${install.realName}@${install.version})`));
     if (!affecting.length) continue;
 
     const reach = classify(install, imports);
     const maxSeverity = affecting.reduce((s, a) => (severityRank(a.severity) > severityRank(s) ? a.severity : s), 'info');
-    if (!versionCache.has(install.name)) versionCache.set(install.name, await versionLookup(install.name));
-    const fix = pickSafeVersion(install.version, versionCache.get(install.name), all);
+    if (!versionCache.has(install.realName)) versionCache.set(install.realName, await versionLookup(install.realName));
+    const fix = pickSafeVersion(install.version, versionCache.get(install.realName), all, warnings);
 
     findings.push({
-      package: install.name,
+      package: install.realName,
+      installedAs: install.name,
       version: install.version,
       path: install.path,
       direct: install.direct,
+      declaredBy: install.declaredBy,
+      requiredBy: install.requiredBy,
+      copiesInstalled: copiesByName.get(install.name),
       devOnly: install.dev,
       via: install.via,
       reachability: reach.level,
@@ -73,7 +103,8 @@ export async function triage(projectDir, { advisoryLookup = fetchAdvisories, ver
     (a, b) =>
       priorityRank(b.priority) - priorityRank(a.priority) ||
       severityRank(b.severity) - severityRank(a.severity) ||
-      a.package.localeCompare(b.package),
+      a.package.localeCompare(b.package) ||
+      a.path.localeCompare(b.path),
   );
 
   return {
@@ -87,6 +118,7 @@ export async function triage(projectDir, { advisoryLookup = fetchAdvisories, ver
       advisories: findings.reduce((n, f) => n + f.advisories.length, 0),
     },
     findings,
+    warnings,
   };
 }
 
