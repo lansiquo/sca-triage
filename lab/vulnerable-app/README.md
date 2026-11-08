@@ -20,5 +20,5 @@ Tests:
 - `test/security.test.js` fails on minimist 1.2.5 and passes after the upgrade.
 
 Install it with `--ignore-scripts` (the repo's `npm run lab:install` does this). To try the
-upgrade, run `sca-triage fix --apply` on a **copy** of this folder, so the lab keeps its
+upgrade, run `sca-triage fix` on a **copy** of this folder, so the lab keeps its
 vulnerable starting point.

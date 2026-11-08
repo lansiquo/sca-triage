@@ -18,12 +18,12 @@ they're the point of the lab. Use it locally only.
   An advisory range the tool can't parse counts as vulnerable, with a warning.
 - **Reports:** package names, lockfile paths and failing test names are escaped before they reach the
   Markdown report or job summary, and terminal control characters are replaced in console output.
-- **npm commands:** `fix --apply` installs with `--ignore-scripts`, and refuses to pass npm any
+- **npm commands:** `fix` installs with `--ignore-scripts`, and refuses to pass npm any
   argument built from lockfile or registry data that isn't a plain package name, version or path.
 - **Source scanning:** symlinks are followed only inside the project, and the import patterns are
   bounded so a hostile file can't make the scan backtrack without limit.
 
-`fix --apply` runs the project's own `npm test` before and after the upgrade, so run it only on
+`fix` runs the project's own `npm test` before and after the upgrade, so run it only on
 projects whose test scripts you trust (the CI lab gate does this inside a disposable runner).
 
 Reachability is import-level: "imported" means the code loads the package, not that the vulnerable

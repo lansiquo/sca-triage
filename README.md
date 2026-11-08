@@ -23,14 +23,15 @@ Requires Node.js 20 or newer and access to `registry.npmjs.org`. A scan reads `p
 
 ```bash
 git clone https://github.com/lansiquo/sca-triage.git
-node sca-triage/bin/sca-triage.js scan /path/to/project          # ranked findings
-node sca-triage/bin/sca-triage.js fix  /path/to/project          # dry run: planned upgrades
-node sca-triage/bin/sca-triage.js fix  /path/to/project --apply  # upgrade, test, rescan
+node sca-triage/bin/sca-triage.js scan /path/to/project   # ranked findings
+node sca-triage/bin/sca-triage.js plan /path/to/project   # dry run: planned upgrades
+node sca-triage/bin/sca-triage.js fix  /path/to/project   # upgrade, test, rescan
 ```
 
 ```text
 sca-triage scan [dir] [--json] [--markdown <file>] [--fail-on P1|P2|P3|none]
-sca-triage fix  [dir] [--apply] [--min-priority P1|P2|P3] [--evidence <dir>] [--no-tests]
+sca-triage plan [dir] [--min-priority P1|P2|P3]
+sca-triage fix  [dir] [--min-priority P1|P2|P3] [--evidence <dir>] [--no-tests]
 ```
 
 `--json` prints the full result; `--markdown <file>` also writes the findings table as Markdown.
@@ -65,7 +66,9 @@ Each finding gets a reachability level: `imported` (your runtime code requires o
 covers `require`, `import`, dynamic `import()` and `createRequire()` across JS, TS, JSX/TSX, Vue,
 Svelte and Astro sources, and follows workspaces and aliased packages.
 
-## What `fix --apply` does
+## What `fix` does
+
+Preview first with `plan` (or `fix --dry-run`); it changes nothing. Then `fix`:
 
 1. Runs `npm test` for a baseline.
 2. Pins vulnerable direct dependencies to the safe version (`--save-exact`). Transitive ones get npm
@@ -79,11 +82,14 @@ It prefers a fix on the same release line. A major upgrade is applied only when 
 exists, and it is flagged. `--min-priority P1` limits fixes to P1. If there's no `test` script, or
 you pass `--no-tests`, the changes are applied and marked **unverified**.
 
+> **Changed since v1.0.0:** `fix` on its own now applies the upgrades; it used to be a dry run.
+> Use `plan` to preview. `fix --apply` still works.
+
 ## Exit codes
 
-| Code | `scan` | `fix` |
+| Code | `scan` | `plan` / `fix` |
 |---|---|---|
-| 0 | No finding meets `--fail-on` | Dry run, or upgrades applied and tests passed (or marked unverified) |
+| 0 | No finding meets `--fail-on` | Plan shown, or upgrades applied and tests passed (or marked unverified) |
 | 1 | A finding meets `--fail-on` (default `P1`) | Tests failed after the upgrade |
 | 2 | Usage or input error: bad option, missing or v1 lockfile, invalid `SCA_TRIAGE_REGISTRY`, registry error | Same, plus a failed `npm install` |
 
@@ -101,7 +107,7 @@ Apply the fixes to a fresh copy so the lab keeps its vulnerable starting point:
 ```bash
 rm -rf /tmp/lab-copy /tmp/lab-evidence
 cp -r lab/vulnerable-app /tmp/lab-copy
-node bin/sca-triage.js fix /tmp/lab-copy --apply --evidence /tmp/lab-evidence
+node bin/sca-triage.js fix /tmp/lab-copy --evidence /tmp/lab-evidence
 node bin/sca-triage.js scan /tmp/lab-copy   # rescan the fixed copy: 0 vulnerable, gate passes
 ```
 
@@ -133,7 +139,7 @@ checks this on every push to `main` and every pull request.
 - **Import-level reachability.** "Imported" means your code loads the package, not that the
   vulnerable function runs. Reachability only lowers priority; it never hides a finding.
 - **Tests are the safety net.** An upgrade is only as verified as the project's test suite.
-  `fix --apply` runs that suite, so use it on projects whose test scripts you trust.
+  `fix` runs that suite, so use it on projects whose test scripts you trust.
 - **Results reflect the advisory database at scan time.** Zero findings is not a certification.
 - **Mirrors:** `SCA_TRIAGE_REGISTRY` points at another registry. It must be `https://`
   (`http://` only for this machine) with no credentials in the URL.

@@ -63,7 +63,7 @@ jobs:
       - name: Remediate a copy, run its tests, rescan
         run: |
           cp -r lab/vulnerable-app "$RUNNER_TEMP/remediated"
-          node bin/sca-triage.js fix "$RUNNER_TEMP/remediated" --apply --evidence "$RUNNER_TEMP/evidence"
+          node bin/sca-triage.js fix "$RUNNER_TEMP/remediated" --evidence "$RUNNER_TEMP/evidence"
           cat "$RUNNER_TEMP/evidence/REPORT.md" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Gate must PASS after remediation
