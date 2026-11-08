@@ -1,18 +1,54 @@
 // Read an npm project's package.json + package-lock.json (lockfile v2/v3) into a
 // dependency inventory with the dependency graph, so findings can be traced back
 // to the direct dependency that pulls them in.
+//
+// Every install has two names:
+//   name      - the folder it is installed under, which is what `require()` uses
+//               ("foo" for "foo": "npm:lodash@4.17.21")
+//   realName  - the registry package it really is ("lodash"), which is what
+//               advisories and published versions are keyed by
+// For an ordinary dependency they are the same.
 
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 
+const DEP_FIELDS = ['dependencies', 'optionalDependencies', 'peerDependencies'];
+const MANIFEST_FIELDS = [
+  ['dependencies', 'prod'],
+  ['optionalDependencies', 'optional'],
+  ['peerDependencies', 'peer'],
+  ['devDependencies', 'dev'],
+];
+
 function readJson(path) {
   return JSON.parse(readFileSync(path, 'utf8'));
+}
+
+function ownKeys(obj) {
+  return obj && typeof obj === 'object' && !Array.isArray(obj) ? Object.keys(obj) : [];
 }
 
 // "node_modules/a/node_modules/b" -> "b"; "node_modules/@scope/x" -> "@scope/x"
 function nameFromPath(path) {
   const i = path.lastIndexOf('node_modules/');
   return path.slice(i + 'node_modules/'.length);
+}
+
+// The folder that owns node_modules/: "" for the project root, "packages/app" for a
+// workspace, "node_modules/a" for a nested install.
+function ownerOf(path) {
+  const i = path.lastIndexOf('node_modules/');
+  return i === 0 ? '' : path.slice(0, i - 1);
+}
+
+// Direct dependencies declared by one manifest: Map(name -> "prod"|"optional"|"peer"|"dev").
+// A name listed in several fields keeps the first (runtime) kind.
+function declaredDeps(manifest) {
+  const out = new Map();
+  for (const [field, kind] of MANIFEST_FIELDS) {
+    for (const name of ownKeys(manifest?.[field])) if (!out.has(name)) out.set(name, kind);
+  }
+  return out;
 }
 
 export function loadProject(dir) {
@@ -24,29 +60,45 @@ export function loadProject(dir) {
   }
   const pkg = readJson(pkgPath);
   const lock = readJson(lockPath);
-  if (!lock.packages) {
+  if (!lock.packages || typeof lock.packages !== 'object') {
     throw new Error('package-lock.json v1 is not supported; regenerate it with npm 7 or newer');
   }
 
-  const direct = new Map(); // name -> "prod" | "dev" | "optional"
-  for (const [name] of Object.entries(pkg.dependencies || {})) direct.set(name, 'prod');
-  for (const [name] of Object.entries(pkg.optionalDependencies || {})) direct.set(name, 'optional');
-  for (const [name] of Object.entries(pkg.devDependencies || {})) if (!direct.has(name)) direct.set(name, 'dev');
+  // Manifests that declare direct dependencies: the root package.json and every
+  // workspace package (lockfile entries outside node_modules, like "packages/app").
+  const manifests = new Map([['', declaredDeps(pkg)]]); // owner path -> declared deps
+  const workspaces = [];
+  for (const [path, entry] of Object.entries(lock.packages)) {
+    if (!path || path.includes('node_modules/') || !entry || typeof entry !== 'object') continue;
+    workspaces.push(path);
+    manifests.set(path, declaredDeps(entry));
+  }
+
+  // Root-level direct dependencies, kept for callers: name -> kind.
+  const direct = manifests.get('');
 
   // Every installed copy of every package. The same name can appear at several versions.
   const installs = [];
   const byPath = new Map();
   for (const [path, entry] of Object.entries(lock.packages)) {
-    if (!path || !path.includes('node_modules/') || entry.link) continue;
+    if (!path || !path.includes('node_modules/') || !entry || typeof entry !== 'object' || entry.link) continue;
+    if (!entry.version) continue;
+    const name = nameFromPath(path);
     const item = {
-      name: entry.name || nameFromPath(path),
-      version: entry.version,
+      name,
+      realName: typeof entry.name === 'string' && entry.name ? entry.name : name,
+      version: String(entry.version),
       path,
+      owner: ownerOf(path),
       dev: Boolean(entry.dev),
       optional: Boolean(entry.optional),
-      dependsOn: Object.keys({ ...(entry.dependencies || {}), ...(entry.optionalDependencies || {}) }),
+      dependsOn: [...new Set(DEP_FIELDS.flatMap((f) => ownKeys(entry[f])))],
+      requiredBy: [],
+      declaredBy: [],
     };
-    if (!item.version) continue;
+    item.aliased = item.realName !== item.name;
+    // What project or workspace code gets from require(name): the copy directly in its node_modules.
+    item.topLevel = manifests.has(item.owner);
     installs.push(item);
     byPath.set(path, item);
   }
@@ -63,10 +115,33 @@ export function loadProject(dir) {
     }
   }
 
-  // For each install, which direct dependencies lead to it (the "via" chains).
-  const roots = [...direct.keys()].map((n) => byPath.get(`node_modules/${n}`)).filter(Boolean);
+  // Which installed packages require each copy (used to scope npm overrides).
+  for (const item of installs) {
+    for (const d of item.dependsOn) {
+      const next = resolve(item.path, d);
+      if (next && next !== item && !next.requiredBy.includes(item.name)) next.requiredBy.push(item.name);
+    }
+  }
+
+  // Roots: what each manifest's declared dependencies resolve to. A workspace's
+  // dependencies are roots too, so their subtrees are traced like the root's.
+  const roots = [];
+  for (const [owner, deps] of manifests) {
+    for (const [name, kind] of deps) {
+      const hit = resolve(owner, name);
+      if (!hit) continue;
+      hit.declaredBy.push({ owner, kind });
+      roots.push(hit);
+    }
+  }
+
+  // For each install, which direct dependencies lead to it (the "via" chains),
+  // named by the installed (require-able) name.
   const reachedBy = new Map(); // path -> Set(direct dependency names)
+  const tracedRoots = new Set();
   for (const root of roots) {
+    if (tracedRoots.has(root.path)) continue;
+    tracedRoots.add(root.path);
     const stack = [root];
     const seen = new Set();
     while (stack.length) {
@@ -83,9 +158,9 @@ export function loadProject(dir) {
   }
 
   for (const item of installs) {
-    item.direct = byPath.get(`node_modules/${item.name}`) === item && direct.has(item.name);
+    item.direct = item.declaredBy.length > 0;
     item.via = [...(reachedBy.get(item.path) || [])].sort();
   }
 
-  return { dir, name: pkg.name || '(unnamed)', pkg, direct, installs };
+  return { dir, name: pkg.name || '(unnamed)', pkg, direct, workspaces, installs };
 }

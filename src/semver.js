@@ -82,3 +82,14 @@ export function satisfies(version, range) {
 export function sortVersions(versions) {
   return [...versions].filter((v) => parse(v)).sort(compare);
 }
+
+// The release line a version belongs to under npm's caret rules: "2" for 2.x.y,
+// "0.3" for 0.3.y and "0.0.4" for 0.0.4, since below 1.0.0 a minor (or, below 0.1.0,
+// a patch) bump may break callers. Moving to another line is a breaking upgrade.
+export function releaseLine(version) {
+  const p = typeof version === 'string' ? parse(version) : version;
+  if (!p) return null;
+  if (p.major > 0) return String(p.major);
+  if (p.minor > 0) return `0.${p.minor}`;
+  return `0.0.${p.patch}`;
+}

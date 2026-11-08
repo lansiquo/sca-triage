@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import { loadProject } from '../src/lockfile.js';
 import { findImports, classify, packageNameFromSpecifier } from '../src/reachability.js';
-import { triage, pickSafeVersion, priorityFor, gateFails } from '../src/triage.js';
+import { triage, pickSafeVersion, priorityFor, gateFails, affects } from '../src/triage.js';
 import { planFixes, applyFixes } from '../src/fix.js';
 import { formatMarkdown } from '../src/report.js';
 
@@ -124,4 +124,24 @@ test('fix report says the changes are unverified when tests did not run', async 
   assert.match(md, /Not run — changes applied but UNVERIFIED\*\* \(disabled with --no-tests\)/);
   // A scan report (no "after") has no tests section.
   assert.doesNotMatch(formatMarkdown(r, null), /## Project tests/);
+});
+
+test('0.x minor bumps count as crossing a major', () => {
+  assert.deepEqual(pickSafeVersion('0.9.1', ['0.9.2', '0.10.0'], [{ vulnerableVersions: '<0.9.2' }]), { target: '0.9.2', crossesMajor: false });
+  assert.deepEqual(pickSafeVersion('0.9.1', ['0.10.0', '1.0.0'], [{ vulnerableVersions: '<0.10.0' }]), { target: '0.10.0', crossesMajor: true });
+  assert.deepEqual(pickSafeVersion('garbage', ['1.0.0'], []), { target: null, crossesMajor: false });
+});
+
+test('an advisory range the parser cannot read counts as vulnerable, with a warning', async () => {
+  const warnings = [];
+  assert.equal(affects('1.0.0', '1.0.0 - 1.2.0', warnings, 'G1'), true);
+  assert.match(warnings[0], /G1: unsupported range comparator: "-"; treating it as vulnerable/);
+  const r = await triage(FIXTURE, {
+    advisoryLookup: async () => ({ parser: [{ ghsa: 'G2', severity: 'high', vulnerableVersions: '>=1.0.0, <1.0.3' }] }),
+    versionLookup: async () => ['1.0.3'],
+  });
+  assert.deepEqual(r.findings.map((f) => `${f.package}@${f.version}`), ['parser@1.0.0', 'parser@0.9.1']);
+  assert.ok(r.warnings.some((w) => w.includes('G2')));
+  // No version can be proven safe from an unreadable range.
+  assert.equal(r.findings[0].fix.target, null);
 });
