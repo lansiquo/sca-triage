@@ -6,7 +6,7 @@ import { resolve, join } from 'node:path';
 import { writeFileSync } from 'node:fs';
 import { triage, gateFails } from '../src/triage.js';
 import { planFixes, applyFixes } from '../src/fix.js';
-import { formatTable, formatMarkdown } from '../src/report.js';
+import { formatTable, formatMarkdown, displayName, plain } from '../src/report.js';
 
 const HELP = `Usage:
   sca-triage scan [dir] [--json] [--markdown <file>] [--fail-on P1|P2|P3|none]
@@ -66,16 +66,24 @@ async function main() {
       const plan = planFixes(result, { minPriority });
       if (!plan.actions.length) process.stdout.write('Nothing to upgrade.\n');
       for (const a of plan.actions) {
-        const how = a.direct ? `npm install ${a.package}@${a.target} --save-exact` : `overrides: "${a.package}": "${a.target}"`;
-        process.stdout.write(`${a.package}: ${[...new Set(a.from)].join(', ')} -> ${a.target}${a.crossesMajor ? '  (major upgrade: review release notes)' : ''}\n    ${how}\n`);
+        const how = [
+          ...a.pins.map((p) => `npm install ${a.name}@${a.spec} --save-exact${p.dev ? ' --save-dev' : ''}${p.owner ? ` --workspace ${p.owner}` : ''}`),
+          ...a.overrides.map((o) => (o.scope === null ? `overrides: "${o.name}": "${o.spec}"` : `overrides: "${o.scope}" > "${o.name}": "${o.spec}"`)),
+        ];
+        const label = displayName({ package: a.package, installedAs: a.name });
+        process.stdout.write(
+          `${plain(`${label}: ${[...new Set(a.from)].join(', ')} -> ${a.target}`)}${a.crossesMajor ? '  (major upgrade: review release notes)' : ''}\n${how.map((h) => `    ${plain(h)}\n`).join('')}`,
+        );
       }
-      for (const f of plan.unfixable) process.stdout.write(`${f.package}@${f.version}: no fixed version published yet\n`);
+      for (const f of plan.unfixable) process.stdout.write(plain(`${displayName(f)}@${f.version}: no fixed version published yet`) + '\n');
+      for (const w of result.warnings || []) process.stderr.write(`warning: ${plain(w)}\n`);
       process.stdout.write('\nDry run. Re-run with --apply to make these changes.\n');
       return 0;
     }
     const evidenceDir = opts.evidence ? resolve(opts.evidence) : join(dir, 'evidence', new Date().toISOString().replace(/[:.]/g, '-'));
     const r = await applyFixes(dir, { minPriority, evidenceDir, runTests: !opts.noTests });
-    process.stdout.write(`Applied ${r.changes.length} change(s):\n${r.changes.map((c) => `  ${c}`).join('\n')}\n`);
+    process.stdout.write(`Applied ${r.changes.length} change(s):\n${r.changes.map((c) => `  ${plain(c)}`).join('\n')}\n`);
+    for (const w of r.after.warnings || []) process.stderr.write(`warning: ${plain(w)}\n`);
     if (r.tests) process.stdout.write(`Tests (npm test): ${r.tests.passed ? 'passed' : 'FAILED'}\n`);
     else process.stdout.write(`Tests: not run — changes applied but UNVERIFIED (${r.testsSkipped})\n`);
     process.stdout.write(`After: ${r.after.findings.length} vulnerable packages (P1: ${r.after.summary.P1}, P2: ${r.after.summary.P2}, P3: ${r.after.summary.P3})\n`);
