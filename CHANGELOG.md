@@ -17,6 +17,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Drain large CLI output completely and sanitize terminal control characters in errors.
 - Persist recovery evidence before mutation and after failed post-install verification.
 - Capture large npm/test logs without the default pipe buffer limit; separate SBOM JSON from diagnostics.
+- Reject multi-target scoped override plans on npm older than 11.9.0 before mutation; npm 10 can collapse them to one incorrect version.
 - Confirm applied upgrade targets before reporting success; exclude unconfirmed candidates from auto-fixing.
 
 ### Release checks

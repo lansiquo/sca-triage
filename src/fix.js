@@ -314,6 +314,23 @@ export async function applyFixes(projectDir, { minPriority = 'P3', evidenceDir, 
   let testsBefore = null;
   let step = null; // the command being run, for the failure report
   try {
+    // npm 10 can collapse differently scoped targets to one hoisted version. The
+    // real-npm integration verifies this path with npm 11.9; refuse older clients
+    // before mutation instead of letting a clean rescan hide a wrong major version.
+    const scopedTargets = new Map();
+    for (const action of plan.actions) for (const override of action.overrides) {
+      if (override.scope === null) continue;
+      if (!scopedTargets.has(override.name)) scopedTargets.set(override.name, new Set());
+      scopedTargets.get(override.name).add(override.spec);
+    }
+    if ([...scopedTargets.values()].some((targets) => targets.size > 1)) {
+      step = { command: 'npm --version' };
+      const versionResult = npm(['--version']);
+      const version = (versionResult.stdout ?? versionResult.output).trim();
+      if (versionResult.code !== 0 || acceptsVersion('>=11.9.0', version) !== true) {
+        throw new Error(`Multiple override targets for the same package require npm >=11.9.0 (found ${version}); update npm or upgrade the parents manually`);
+      }
+    }
     // 0) Baseline test run, so the evidence shows what changed.
     testsBefore = testsEnabled ? runProjectTests() : null;
     if (evidenceDir && testsBefore) writeFileSync(join(evidenceDir, 'tests.before.txt'), testsBefore.output);
@@ -412,9 +429,14 @@ function verifyTargets(projectDir, before, plan) {
     const sources = before.findings.filter((f) => action.paths.includes(f.path));
     const ok = sources.every((f) => {
       const origins = f.direct ? f.declaredBy.map((d) => d.owner)
-        : f.requiredEdges?.length ? f.requiredEdges.map((r) => r.path)
-          : [f.path.slice(0, Math.max(0, f.path.lastIndexOf('node_modules/'))).replace(/\/$/, '')];
+        : f.requiredEdges?.length ? f.requiredEdges.flatMap((r) => {
+          // npm may rehoist the parent while applying overrides. Follow its identity
+          // and version to the new location instead of resolving from a stale path.
+          const parents = project.installs.filter((i) => i.name === r.by && i.version === r.version);
+          return parents.length ? parents.map((i) => i.path) : [null];
+        }) : [f.path.slice(0, Math.max(0, f.path.lastIndexOf('node_modules/'))).replace(/\/$/, '')];
       return origins.every((origin) => {
+        if (origin === null) return false;
         const installed = project.resolveDependency(origin, action.name);
         return installed?.realName === action.package && installed.version === action.target;
       });

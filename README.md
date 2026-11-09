@@ -192,6 +192,10 @@ so you can see what broke, and it exits with code 1.
    snapshots, both lockfiles, test logs, `commands.txt`, and a CycloneDX SBOM when npm can generate it.
    SBOM stderr is saved separately; malformed JSON is never saved as an SBOM.
 
+Plans that need multiple override targets for the same package require **npm 11.9.0 or newer**.
+Older clients can collapse those targets into the wrong version; `fix` refuses such plans before
+mutation. `scan` and `plan` remain available.
+
 A post-install test execution error or failed rescan exits 2 and preserves applied changes, with
 an explicit incomplete-verification report and recovery snapshots. Normal test failures exit 1.
 The CLI reports how many upgrade targets were actually confirmed in the lockfile; an unresolved

@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync, spawn } from 'node:child_process';
 import { createServer } from 'node:http';
+import { acceptsVersion } from '../src/semver.js';
 
 const cli = fileURLToPath(new URL('../bin/sca-triage.js', import.meta.url));
 const json = (file, value) => writeFileSync(file, JSON.stringify(value, null, 2));
@@ -103,7 +104,17 @@ test('F02/F03/F04: real npm preserves declarations, alias identities and version
     child.stdout.on('data', (d) => { output += d; }); child.stderr.on('data', (d) => { output += d; });
     child.on('error', reject); child.on('close', (code) => code === 0 ? resolve() : reject(new Error(output)));
   });
+  const manifestBefore = readFileSync(join(scoped, 'package.json'), 'utf8');
+  const lockBefore = readFileSync(join(scoped, 'package-lock.json'), 'utf8');
+  const npmVersion = spawnSync(npm, ['--version'], { encoding: 'utf8', shell: process.platform === 'win32' }).stdout.trim();
   const scopedResult = await run(scoped);
+  if (!acceptsVersion('>=11.9.0', npmVersion)) {
+    assert.equal(scopedResult.code, 2, JSON.stringify(scopedResult));
+    assert.match(scopedResult.stderr, /require npm >=11\.9\.0/);
+    assert.equal(readFileSync(join(scoped, 'package.json'), 'utf8'), manifestBefore);
+    assert.equal(readFileSync(join(scoped, 'package-lock.json'), 'utf8'), lockBefore);
+    return;
+  }
   assert.equal(scopedResult.code, 0, JSON.stringify(scopedResult));
   assert.deepEqual(JSON.parse(readFileSync(join(scoped, 'package.json'))).overrides, {
     'parent@1.0.0': { x: '1.0.1' }, 'parent@2.0.0': { x: '2.0.1' },
