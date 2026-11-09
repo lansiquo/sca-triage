@@ -1,7 +1,17 @@
 {
   "name": "sca-triage",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "description": "npm SCA scanner: rank dependency vulnerabilities by whether your code loads them, apply the smallest safe upgrades, and prove them with your project's tests.",
+  "license": "MIT",
+  "author": "Robin Lansiquot",
+  "homepage": "https://github.com/lansiquo/sca-triage#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lansiquo/sca-triage.git"
+  },
+  "bugs": {
+    "url": "https://github.com/lansiquo/sca-triage/issues"
+  },
   "type": "module",
   "bin": {
     "sca-triage": "bin/sca-triage.js"
@@ -18,7 +28,8 @@
   },
   "scripts": {
     "test": "node scripts/test.mjs",
-    "test:pack": "node scripts/pack-smoke.mjs"
+    "test:pack": "node scripts/pack-smoke.mjs",
+    "prepublishOnly": "npm test"
   },
   "keywords": [
     "sca",
@@ -31,13 +42,5 @@
     "github-action",
     "sbom",
     "cyclonedx"
-  ],
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/lansiquo/sca-triage.git"
-  },
-  "bugs": {
-    "url": "https://github.com/lansiquo/sca-triage/issues"
-  },
-  "homepage": "https://github.com/lansiquo/sca-triage#readme"
+  ]
 }

@@ -23,7 +23,7 @@ test('no command prints help and exits 2 (usage error)', () => {
 // plan / fix --dry-run against a local fake registry: they must print the plan and change nothing.
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
-import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -85,6 +85,18 @@ test('plan rejects fix-only options (usage error, exit 2)', () => {
     assert.equal(r.status, 2, extra.join(' '));
     assert.match(r.stderr, /does not support option/);
   }
+});
+
+test('fix refuses a default evidence folder that is a symbolic link', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'sca-evlink-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  cpSync(fixture, join(dir, 'app'), { recursive: true });
+  rmSync(join(dir, 'app', 'evidence'), { recursive: true, force: true });
+  mkdirSync(join(dir, 'elsewhere'));
+  symlinkSync(join(dir, 'elsewhere'), join(dir, 'app', 'evidence'));
+  const r = run('fix', join(dir, 'app'), '--no-tests');
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /is a symbolic link; pass --evidence/);
 });
 
 test('fix rejects --dry-run combined with --apply', () => {

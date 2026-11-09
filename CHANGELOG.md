@@ -7,24 +7,56 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.2.3] - 2026-11-09
+
 ### Fixed
+- **Advisory ranges with partial versions.** Real advisories use ranges like `>=13.0 <14.2.30`
+  (`next`) and `>0 <=5.10.9` (`tinymce`). They couldn't be read, so every upgrade counted as
+  vulnerable and those packages showed "no fixed version published". They are now read the way npm
+  reads them, and so are hyphen ranges.
+- **Imports in comments counted.** A commented-out `require` counted as an import. In OWASP
+  NodeGoat, `helmet` is commented out, so `debug@2.2.0` "via helmet" was a false P1 (NodeGoat now
+  has 12 P1, not 13).
+- **Reachability.** Imports are tied to the installed copy they load and followed through its
+  dependencies, including packages imported without being declared, hoisted copies and workspaces.
+  A test folder that links to source code no longer makes that code test-only. Files over 2 MB,
+  which aren't read, are named in a warning. Long import lists and files with many imports no
+  longer slow the scan down quadratically.
+- **Lockfile and advisory checks.** A malformed lockfile, one missing a declared dependency, an
+  entry whose name or version doesn't match its registry tarball, or an advisory with a missing or
+  unknown severity is now an error (exit 2) instead of a quieter scan. Lockfiles written with
+  `--legacy-peer-deps` and `file:` folders outside the project still load.
+- **Option values.** `fix --min-priority --dry-run`, with the value missing, took `--dry-run` as the
+  priority and applied the upgrades. A missing value or unknown priority is now a usage error
+  before anything runs.
+- **Dependency types.** Pins keep each dependency's type, including optional and peer dependencies
+  and names listed in two fields. With `--save-prod`, npm moved an optional dependency to
+  `dependencies` and kept the old version. Aliases (`"x": "npm:y@1"`) stay aliases.
+- **Overrides that reached too far.** An override could also change copies outside the plan,
+  including safe ones (one test project ended up with a dependency forced down a major version),
+  and two versions of a parent that needed different targets let the last one win. `fix` now
+  writes an override only when it reaches nothing else, lists the other upgrades as "needs a manual
+  upgrade" with the reason, and applies the rest. Existing nested overrides are kept.
+- **Install check.** After installing, `fix` checks that every package that used a planned copy now
+  gets the safe version, before the tests run. If npm installed anything else, everything is
+  rolled back.
+- **`.npmrc`.** A project's `.npmrc` could make npm run another program as `git`, even with
+  `--no-tests`. `fix` now always uses the system `git`.
+- **Evidence.** The baseline scan, snapshots and npm commands are written before anything changes
+  and kept when the final rescan fails. A symlinked default `evidence/` folder is refused. Large test
+  logs are captured in full, and the SBOM file contains only npm's JSON. A target not confirmed
+  against the registry after 5 lookups is no longer applied automatically.
+- **Output.** Output piped to another program was cut off at 64 KB. Error messages are cleaned of
+  terminal control characters, and the Action stops workflow commands while the scan prints, so
+  names from the scanned project can't add annotations to the log.
 
-- Reject missing option values, invalid priorities, malformed lockfiles and advisories without valid severity.
-- Preserve optional, peer, dual-field and aliased dependency declarations during upgrades.
-- Qualify parent overrides by version, reject conflicting/unsafe scopes and retain nested override rules.
-- Resolve imports to installed copies, including hoisted transitive dependencies and workspace boundaries.
-- Scan long import/export declarations without fixed length limits; keep dense source scanning linear.
-- Drain large CLI output completely and sanitize terminal control characters in errors.
-- Persist recovery evidence before mutation and after failed post-install verification.
-- Capture large npm/test logs without the default pipe buffer limit; separate SBOM JSON from diagnostics.
-- Reject multi-target scoped override plans on npm older than 11.9.0 before mutation; npm 10 can collapse them to one incorrect version.
-- Confirm applied upgrade targets before reporting success; exclude unconfirmed candidates from auto-fixing.
-
-### Release checks
-
-- Add regression tests for all 16 audit findings and real npm integration scenarios.
-- Include linked documentation and repository metadata in the npm package.
-- Test packed consumers and Node 20/22/24 across Linux, macOS and Windows in CI.
+### Added
+- Published to npm: run it with `npx sca-triage` or install it with `npm install -g sca-triage`.
+  The README uses `npx` in its examples.
+- MIT license, and package metadata for the npm page: author, repository, homepage and issue
+  tracker. ARCHITECTURE.md, CHANGELOG.md and SECURITY.md are in the package.
+- Regression tests for each fix, tests that run `fix` with real npm against a local registry, a
+  packed-package check, and CI on Node 20, 22 and 24 on Linux, macOS and Windows.
 
 ## [1.2.2] - 2026-11-09
 

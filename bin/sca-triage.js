@@ -3,10 +3,10 @@
 // then apply the smallest safe upgrades and prove them with your tests.
 
 import { resolve, join } from 'node:path';
-import { writeFileSync } from 'node:fs';
+import { writeFileSync, existsSync, lstatSync } from 'node:fs';
 import { triage, gateFails } from '../src/triage.js';
 import { planFixes, applyFixes, pinCommands } from '../src/fix.js';
-import { formatTable, formatMarkdown, formatTestsLine, displayName, plain, formatBundled } from '../src/report.js';
+import { formatTable, formatMarkdown, formatTestsLine, displayName, plain, formatBundled, formatManual } from '../src/report.js';
 
 const HELP = `Usage:
   sca-triage scan [dir] [--json] [--markdown <file>] [--fail-on P1|P2|P3|none]
@@ -116,15 +116,19 @@ async function main() {
         );
       }
       for (const f of plan.unfixable) process.stdout.write(plain(`${displayName(f)}@${f.version}: ${f.fix.verified === false && f.fix.target ? 'candidate target is unverified; review manually' : 'no fixed version published yet'}`) + '\n');
-      for (const line of formatBundled(plan.bundled)) process.stdout.write(line + '\n');
+      for (const line of [...formatManual(plan.manual), ...formatBundled(plan.bundled)]) process.stdout.write(line + '\n');
       for (const w of result.warnings || []) process.stderr.write(`warning: ${plain(w)}\n`);
       process.stdout.write('\nDry run: nothing was changed. Run "sca-triage fix" to apply these upgrades.\n');
       return 0;
     }
+    // The default evidence folder is inside the project, which may link it elsewhere.
+    if (!opts.evidence && existsSync(join(dir, 'evidence')) && lstatSync(join(dir, 'evidence')).isSymbolicLink()) {
+      throw new Error(`${join(dir, 'evidence')} is a symbolic link; pass --evidence <dir> to choose where the report goes`);
+    }
     const evidenceDir = opts.evidence ? resolve(opts.evidence) : join(dir, 'evidence', new Date().toISOString().replace(/[:.]/g, '-'));
     const r = await applyFixes(dir, { minPriority, evidenceDir, runTests: !opts.noTests });
     process.stdout.write(`Verified ${r.verification.confirmed.length} of ${r.plan.actions.length} upgrade target(s):\n${r.changes.map((c) => `  ${plain(c)}`).join('\n')}\n`);
-    for (const line of formatBundled(r.plan.bundled)) process.stdout.write(line + '\n');
+    for (const line of [...formatManual(r.plan.manual), ...formatBundled(r.plan.bundled)]) process.stdout.write(line + '\n');
     for (const w of new Set([...(r.before.warnings || []), ...(r.after.warnings || [])])) process.stderr.write(`warning: ${plain(w)}\n`);
     process.stdout.write(`${formatTestsLine(r)}\n`);
     process.stdout.write(`After: ${r.after.findings.length} vulnerable packages (P1: ${r.after.summary.P1}, P2: ${r.after.summary.P2}, P3: ${r.after.summary.P3})\n`);
@@ -140,7 +144,9 @@ async function main() {
 main().then(
   (code) => { process.exitCode = code; },
   (err) => {
-    process.stderr.write(`sca-triage: ${String(err.message).split('\n').map(plain).join('\n')}\n`);
+    // Continuation lines are indented, so text from the project can't start a line with
+    // "::" (a GitHub Actions workflow command).
+    process.stderr.write(`sca-triage: ${String(err.message).split('\n').map(plain).join('\n  ')}\n`);
     process.exitCode = 2;
   },
 );

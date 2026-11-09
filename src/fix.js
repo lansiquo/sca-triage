@@ -27,7 +27,9 @@ function spawnNpm(cmd, args, cwd) {
     err = openSync(join(temp, 'stderr'), 'w');
     const res = spawnSync(cmd, args, {
       cwd, stdio: ['ignore', out, err], shell: process.platform === 'win32',
-      env: { ...process.env, npm_config_fund: 'false', npm_config_audit: 'false', npm_config_update_notifier: 'false' },
+      // npm reads the project's .npmrc, which can name the program npm runs as git
+      // ("git=./script"). Environment settings win over it, so pin git to the real one.
+      env: { ...process.env, npm_config_fund: 'false', npm_config_audit: 'false', npm_config_update_notifier: 'false', npm_config_git: 'git' },
     });
     const stdout = readFileSync(join(temp, 'stdout'), 'utf8');
     const stderr = readFileSync(join(temp, 'stderr'), 'utf8');
@@ -62,6 +64,10 @@ function installSpec(f, target) {
 //                the packages that require each copy ({ parent: { name: spec } }), so
 //                a global override never pins every copy (and a direct dependency, which
 //                npm refuses) to one version.
+// Keys are plain parent names: npm 10 does not reliably apply version-qualified keys
+// ("parent@1.0.0"). A key covers every version of the parent and its whole subtree, so an
+// action whose overrides would also change copies outside it, or that needs two targets under
+// one key, is not applied: it is returned in `manual` with the reason.
 export function planFixes(result, { minPriority = 'P3' } = {}) {
   if (!['P1', 'P2', 'P3'].includes(minPriority)) throw new Error('--min-priority must be one of P1, P2, P3');
   const threshold = priorityRank(minPriority);
@@ -125,21 +131,18 @@ export function planFixes(result, { minPriority = 'P3' } = {}) {
           // requiring body-parser "1.18.3") would get its own old copy once the pin lands.
           for (const r of f.requiredEdges || f.requiredSpecs || []) {
             if (r.by === name || acceptsVersion(r.spec, target) !== false) continue;
-            const scope = r.version ? `${r.by}@${r.version}` : r.by;
-            if (!action.overrides.some((o) => o.scope === scope)) action.overrides.push({ scope, name, spec });
+            if (!action.overrides.some((o) => o.scope === r.by)) action.overrides.push({ scope: r.by, name, spec });
           }
         } else if (globalOverride) {
           if (!action.overrides.length) action.overrides.push({ scope: null, name, spec });
         } else {
           // Scope to the packages that require this copy; fall back to the folder it is nested in.
-          let parents = f.requiredEdges?.length
-            ? f.requiredEdges.map((p) => `${p.by}@${p.version}`)
-            : (f.requiredBy || []).filter((p) => p !== name);
+          let parents = [...new Set([...(f.requiredBy || []), ...(f.requiredEdges || []).map((r) => r.by)])].filter((p) => p !== name);
           if (!parents.length) {
             const i = f.path.lastIndexOf('/node_modules/');
             if (i !== -1) parents = [f.path.slice(0, i).split('node_modules/').pop()];
           }
-          if (!parents.length) throw new Error(`cannot safely scope an override for ${name} at ${f.path}; upgrade its parent manually`);
+          if (!parents.length) action.unscoped = `nothing in package-lock.json says which package requires ${name}@${f.version} at ${f.path}`;
           for (const scope of parents) {
             if (!action.overrides.some((o) => o.scope === scope)) action.overrides.push({ scope, name, spec });
           }
@@ -148,37 +151,69 @@ export function planFixes(result, { minPriority = 'P3' } = {}) {
       actions.push(action);
     }
   }
-  validateActions(actions);
-  validateCoverage(actions, result.inventory);
-  return { actions, unfixable, bundled };
+  const manual = [];
+  const planned = settle(actions, result.inventory, manual);
+  return { actions: planned, unfixable, bundled, manual };
 }
 
-// Merge planned overrides into a package.json "overrides" object, following npm's
-// syntax: { name: spec } globally, or { parent: { name: spec } } scoped to a parent.
-// A parent that already has a plain override keeps it under ".".
-// npm selectors apply throughout a parent's subtree. Check every matching copy,
-// including safe or lower-priority copies, before allowing an override to rewrite it.
-function validateCoverage(actions, inventory) {
-  if (!inventory) return;
+// Split the actions into those that can be applied safely and those that need a manual
+// upgrade (returned in `manual` as { action, reason }).
+function settle(actions, inventory, manual) {
+  const skip = new Map(); // action -> reason
+  // Two actions that need different versions under the same key can't both be written.
+  const byKey = new Map();
+  for (const a of actions) {
+    for (const pin of a.pins) addTo(byKey, `the ${pin.owner || 'root'} package.json entry for "${a.name}"`, a);
+    for (const o of a.overrides) addTo(byKey, o.scope === null ? `the override for "${o.name}"` : `the override "${o.scope}" > "${o.name}"`, a);
+  }
+  for (const [key, list] of byKey) {
+    const specs = [...new Set(list.map((a) => a.spec))];
+    if (specs.length < 2) continue;
+    for (const a of list) if (!skip.has(a)) skip.set(a, `${key} would need several versions (${specs.join(', ')})`);
+  }
+  for (const a of actions) if (a.unscoped && !skip.has(a)) skip.set(a, a.unscoped);
+  // npm applies an override to the parent's whole subtree, whatever its version.
+  for (const a of actions) {
+    if (skip.has(a)) continue;
+    const reason = coverageProblem(a, inventory);
+    if (reason) skip.set(a, reason);
+  }
+  for (const [action, reason] of skip) manual.push({ action, reason });
+  return actions.filter((a) => !skip.has(a));
+}
+
+function addTo(map, key, value) {
+  if (!map.has(key)) map.set(key, []);
+  if (!map.get(key).includes(value)) map.get(key).push(value);
+}
+
+// A copy an override reaches is fine when it is in the action, or on the target's release line
+// at or below it (it moves up to the safe target). Anything else would change unrelated code.
+function coverageProblem(action, inventory) {
+  if (!inventory) return null;
   const nodes = new Map(inventory.map((item) => [item.path, item]));
-  for (const action of actions) for (const override of action.overrides) {
-    const roots = override.scope === null ? inventory : inventory.filter((item) => `${item.name}@${item.version}` === override.scope);
+  for (const override of action.overrides) {
+    const roots = override.scope === null ? inventory : inventory.filter((item) => item.name === override.scope);
     const queue = [...roots], seen = new Set();
     while (queue.length) {
       const item = queue.pop();
       if (seen.has(item.path)) continue;
       seen.add(item.path);
-      if (item.name === action.name && !item.bundledIn) {
-        if (item.realName !== action.package || (!action.paths.includes(item.path)
-          && (releaseLine(item.version) !== releaseLine(action.target) || compare(item.version, action.target) > 0))) {
-          throw new Error(`override ${override.scope || '(global)'} > ${action.name} would rewrite an unrelated copy at ${item.path}; upgrade its parents manually`);
-        }
+      if (item.name === action.name && !item.bundledIn && !action.paths.includes(item.path)
+        && (item.realName !== action.package || releaseLine(item.version) !== releaseLine(action.target) || compare(item.version, action.target) > 0)) {
+        const key = override.scope === null ? `"${action.name}"` : `"${override.scope}" > "${action.name}"`;
+        return `the override ${key} would also change ${item.realName}@${item.version} at ${item.path}`;
       }
-      for (const path of item.dependencyPaths) if (nodes.has(path)) queue.push(nodes.get(path));
+      for (const path of item.dependencyPaths || []) if (nodes.has(path)) queue.push(nodes.get(path));
     }
   }
+  return null;
 }
 
+// Merge planned overrides into a package.json "overrides" object, following npm's
+// syntax: { name: spec } globally, or { parent: { name: spec } } scoped to a parent.
+// A parent that already has a plain override keeps it under ".", and an existing nested
+// override keeps its children.
 function validateActions(actions) {
   const assignments = new Map();
   const set = (key, value) => {
@@ -214,12 +249,6 @@ export function applyOverrides(existing, actions) {
         setOverride(overrides, o.name, o.spec);
         changes.push(`package.json overrides: "${o.name}": "${o.spec}"`);
       } else {
-        const parent = o.scope.slice(0, o.scope.lastIndexOf('@'));
-        // A broader existing selector may take precedence in npm. Do not silently
-        // shadow it or erase its descendants to force the new selector to win.
-        if (parent && Object.hasOwn(overrides, parent) && object(overrides[parent]) && Object.hasOwn(overrides[parent], o.name)) {
-          throw new Error(`existing override ${parent} > ${o.name} overlaps ${o.scope}; reconcile it manually`);
-        }
         const cur = Object.hasOwn(overrides, o.scope) ? overrides[o.scope] : undefined;
         const scoped = object(cur) ? cur : cur === undefined ? {} : { '.': cur };
         setOverride(scoped, o.name, o.spec);
@@ -271,7 +300,8 @@ function editPins(projectDir, command) {
 
 const RESTORE_HINT = 'node_modules may still hold the partial install: run "npm ci" to match the restored lockfile';
 
-export async function applyFixes(projectDir, { minPriority = 'P3', evidenceDir, runTests = true, lookups, exec } = {}) {
+// `exec` replaces npm and `verifyInstall` the post-install check, for tests with a fake npm.
+export async function applyFixes(projectDir, { minPriority = 'P3', evidenceDir, runTests = true, lookups, exec, verifyInstall = verifyTargets } = {}) {
   const before = await triage(projectDir, lookups);
   const plan = planFixes(before, { minPriority });
   const changes = [];
@@ -312,25 +342,9 @@ export async function applyFixes(projectDir, { minPriority = 'P3', evidenceDir, 
   }
 
   let testsBefore = null;
+  let verification = { confirmed: [], unresolved: [] };
   let step = null; // the command being run, for the failure report
   try {
-    // npm 10 can collapse differently scoped targets to one hoisted version. The
-    // real-npm integration verifies this path with npm 11.9; refuse older clients
-    // before mutation instead of letting a clean rescan hide a wrong major version.
-    const scopedTargets = new Map();
-    for (const action of plan.actions) for (const override of action.overrides) {
-      if (override.scope === null) continue;
-      if (!scopedTargets.has(override.name)) scopedTargets.set(override.name, new Set());
-      scopedTargets.get(override.name).add(override.spec);
-    }
-    if ([...scopedTargets.values()].some((targets) => targets.size > 1)) {
-      step = { command: 'npm --version' };
-      const versionResult = npm(['--version']);
-      const version = (versionResult.stdout ?? versionResult.output).trim();
-      if (versionResult.code !== 0 || acceptsVersion('>=11.9.0', version) !== true) {
-        throw new Error(`Multiple override targets for the same package require npm >=11.9.0 (found ${version}); update npm or upgrade the parents manually`);
-      }
-    }
     // 0) Baseline test run, so the evidence shows what changed.
     testsBefore = testsEnabled ? runProjectTests() : null;
     if (evidenceDir && testsBefore) writeFileSync(join(evidenceDir, 'tests.before.txt'), testsBefore.output);
@@ -362,6 +376,14 @@ export async function applyFixes(projectDir, { minPriority = 'P3', evidenceDir, 
       const r = npm(['install', '--ignore-scripts']);
       if (r.code !== 0) throw Object.assign(new Error(`npm install (overrides) failed:\n${r.output}`), { npmOutput: r.output });
     }
+
+    // 3) Before the tests: every package that used a planned copy must now get the target.
+    //    npm can quietly keep an old copy or resolve to another package; then nothing is kept.
+    step = { command: 'check the installed versions in package-lock.json' };
+    verification = verifyInstall(projectDir, before, plan);
+    if (verification.unresolved.length) {
+      throw new Error(`npm did not install the planned version for ${verification.unresolved.join('; ')}`);
+    }
   } catch (err) {
     throw rollback(err, { projectDir, evidenceDir, before, step, changes, snapshots, testsBefore });
   }
@@ -369,12 +391,10 @@ export async function applyFixes(projectDir, { minPriority = 'P3', evidenceDir, 
   // From this point onward, verification failures preserve applied changes and
   // always record their state. A registry outage is not a successful rescan.
   let tests = null, after = null;
-  let verification;
   try {
     tests = testsEnabled ? runProjectTests() : null;
     if (evidenceDir && tests) writeFileSync(join(evidenceDir, 'tests.after.txt'), tests.output);
     after = await triage(projectDir, lookups);
-    verification = verifyTargets(projectDir, before, plan);
   } catch (err) {
     let note = '';
     if (evidenceDir) {
@@ -382,7 +402,7 @@ export async function applyFixes(projectDir, { minPriority = 'P3', evidenceDir, 
         saveSnapshots(evidenceDir, 'after', snapshots.map(([file]) => [file, readFileSync(join(projectDir, file), 'utf8')]));
         writeFileSync(join(evidenceDir, 'package-lock.after.json'), readFileSync(lockPath, 'utf8'));
         writeFileSync(join(evidenceDir, 'verification-error.txt'), String(err.stack || err));
-        writeFileSync(join(evidenceDir, 'REPORT.md'), formatMarkdown(before, after, { changes, tests, testsBefore, testsSkipped, verificationError: err.message }));
+        writeFileSync(join(evidenceDir, 'REPORT.md'), formatMarkdown(before, after, { changes, tests, testsBefore, testsSkipped, manual: plan.manual, verificationError: err.message }));
         note = `\nEvidence: ${evidenceDir}`;
       } catch (e) { note = `\nCould not finish writing evidence: ${e.message}`; }
     }
@@ -408,7 +428,7 @@ export async function applyFixes(projectDir, { minPriority = 'P3', evidenceDir, 
       verificationWarnings.push(`SBOM unavailable: ${err.message}`);
       writeFileSync(join(evidenceDir, 'sbom-error.txt'), String(err.message));
     }
-    writeFileSync(join(evidenceDir, 'REPORT.md'), formatMarkdown(before, after, { changes, tests, testsBefore, testsSkipped, verificationWarnings }));
+    writeFileSync(join(evidenceDir, 'REPORT.md'), formatMarkdown(before, after, { changes, tests, testsBefore, testsSkipped, manual: plan.manual, verificationWarnings }));
   }
   return { before, after, plan, changes, tests, testsBefore, testsSkipped, verification, verificationWarnings,
     evidenceWritten: Boolean(evidenceDir && existsSync(evidenceDir)) };
@@ -422,26 +442,28 @@ function saveSnapshots(evidenceDir, stage, snapshots) {
   }
 }
 
+// For each action, every place that used one of its copies: the manifests that declare it and
+// the packages that require it (found again by name and version, since npm may move them).
+// Each must now resolve to the target, as the same registry package.
 function verifyTargets(projectDir, before, plan) {
   const project = loadProject(projectDir);
   const unresolved = [], confirmed = [];
   for (const action of plan.actions) {
-    const sources = before.findings.filter((f) => action.paths.includes(f.path));
-    const ok = sources.every((f) => {
-      const origins = f.direct ? f.declaredBy.map((d) => d.owner)
-        : f.requiredEdges?.length ? f.requiredEdges.flatMap((r) => {
-          // npm may rehoist the parent while applying overrides. Follow its identity
-          // and version to the new location instead of resolving from a stale path.
-          const parents = project.installs.filter((i) => i.name === r.by && i.version === r.version);
-          return parents.length ? parents.map((i) => i.path) : [null];
-        }) : [f.path.slice(0, Math.max(0, f.path.lastIndexOf('node_modules/'))).replace(/\/$/, '')];
-      return origins.every((origin) => {
-        if (origin === null) return false;
-        const installed = project.resolveDependency(origin, action.name);
-        return installed?.realName === action.package && installed.version === action.target;
-      });
+    const origins = new Set();
+    for (const f of before.findings.filter((x) => action.paths.includes(x.path))) {
+      if (f.direct) for (const d of f.declaredBy || []) origins.add(d.owner);
+      for (const r of f.requiredEdges || []) {
+        if (r.by === action.name) continue;
+        for (const i of project.installs) if (i.name === r.by && i.version === r.version && !i.inBundle) origins.add(i.path);
+      }
+      if (!f.direct && !f.requiredEdges?.length) origins.add(f.path.slice(0, Math.max(0, f.path.lastIndexOf('/node_modules/'))));
+    }
+    const wrong = [...origins].filter((origin) => {
+      const got = project.resolveDependency(origin, action.name);
+      return !got || got.realName !== action.package || got.version !== action.target;
     });
-    (ok ? confirmed : unresolved).push(`${action.name}@${action.target}`);
+    if (wrong.length) unresolved.push(`${action.name}@${action.target} (still different under ${wrong.map((o) => o || 'the project root').join(', ')})`);
+    else confirmed.push(`${action.name}@${action.target}`);
   }
   return { confirmed, unresolved };
 }

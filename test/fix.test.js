@@ -92,7 +92,7 @@ test('workspace dependencies are pinned in their workspace', async () => {
   const byTarget = Object.fromEntries(planFixes(r).actions.map((a) => [a.target, a]));
   assert.deepEqual(byTarget['5.0.1'].pins, [{ owner: 'packages/tools', kinds: ['prod'], dev: false }]);
   assert.deepEqual(byTarget['5.0.1'].overrides, []);
-  assert.deepEqual(byTarget['6.1.0'].overrides, [{ scope: 'express@4.0.0', name: 'qs', spec: '6.1.0' }]);
+  assert.deepEqual(byTarget['6.1.0'].overrides, [{ scope: 'express', name: 'qs', spec: '6.1.0' }]);
 });
 
 test('overrides merge into npm syntax without losing existing entries', () => {
@@ -149,6 +149,9 @@ function tempProject(t, { testScript = false } = {}) {
 }
 
 // Records npm calls; every install changes the lockfile, as npm would.
+// A fake npm changes no versions, so tests that use it skip the post-install version check.
+const skipVerify = (dir, before, plan) => ({ confirmed: plan.actions.map((a) => `${a.name}@${a.target}`), unresolved: [] });
+
 function fakeNpm(app, respond = () => 0) {
   const calls = [];
   const exec = (cmd, args) => {
@@ -163,18 +166,25 @@ function fakeNpm(app, respond = () => 0) {
   return { exec, calls };
 }
 
+test('an install that leaves the old versions in place is rolled back before the tests', async (t) => {
+  const { app, evidence } = tempProject(t);
+  const before = readFileSync(join(app, 'package.json'), 'utf8') + readFileSync(join(app, 'package-lock.json'), 'utf8');
+  const npm = fakeNpm(app); // installs nothing
+  await assert.rejects(applyFixes(app, { lookups: LOOKUPS, evidenceDir: evidence, exec: npm.exec }),
+    /npm did not install the planned version for [\s\S]*Fix rolled back/);
+  assert.equal(readFileSync(join(app, 'package.json'), 'utf8') + readFileSync(join(app, 'package-lock.json'), 'utf8'), before);
+  assert.ok(!npm.calls.includes('test'), 'the tests must not run on an unverified install');
+});
+
 test('fix runs one install per manifest group plus one for overrides', async (t) => {
   const { app, evidence } = tempProject(t);
   const npm = fakeNpm(app);
-  const r = await applyFixes(app, { lookups: LOOKUPS, evidenceDir: evidence, exec: npm.exec });
+  const r = await applyFixes(app, { lookups: LOOKUPS, evidenceDir: evidence, exec: npm.exec, verifyInstall: skipVerify });
   assert.deepEqual(npm.calls.filter((c) => c.startsWith('install')), [
     'install web-lib@2.0.1 unused-lib@1.0.1 --save-exact --ignore-scripts --save-prod',
     'install test-lib@3.1.0 --save-exact --ignore-scripts --save-dev',
     'install --ignore-scripts',
   ]);
-  // The fake never installs target versions: success must not be claimed.
-  assert.equal(r.verification.confirmed.length, 0);
-  assert.equal(r.verification.unresolved.length, r.plan.actions.length);
   // The report lists the commands that ran.
   assert.ok(r.changes.includes('npm install web-lib@2.0.1 unused-lib@1.0.1 --save-exact --ignore-scripts --save-prod'));
   assert.ok(r.changes.includes('npm install test-lib@3.1.0 --save-exact --ignore-scripts --save-dev'));
@@ -187,7 +197,7 @@ test('a failed install restores package.json and the lockfile and writes a failu
   const lockBefore = readFileSync(join(app, 'package-lock.json'), 'utf8');
   // The pins succeed; the overrides install fails after package.json has been rewritten.
   const npm = fakeNpm(app, (args) => (args.join(' ') === 'install --ignore-scripts' ? 1 : 0));
-  await assert.rejects(applyFixes(app, { lookups: LOOKUPS, evidenceDir: evidence, exec: npm.exec }), (err) => {
+  await assert.rejects(applyFixes(app, { lookups: LOOKUPS, evidenceDir: evidence, exec: npm.exec, verifyInstall: skipVerify }), (err) => {
     assert.match(err.message, /npm install \(overrides\) failed/);
     assert.match(err.message, /Fix rolled back: package\.json and package-lock\.json were restored/);
     assert.match(err.message, /npm ci/);
@@ -223,7 +233,7 @@ test('a failed fix also restores the workspace manifests its pins changed', asyn
     advisoryLookup: async () => ({ qs: [{ ghsa: 'G1', severity: 'high', vulnerableVersions: '<5.0.1 || >=6.0.0 <6.1.0' }] }),
     versionLookup: async () => ['5.0.1', '6.1.0'],
   };
-  await assert.rejects(applyFixes(app, { lookups, exec }),
+  await assert.rejects(applyFixes(app, { lookups, exec, verifyInstall: skipVerify }),
     /Fix rolled back: package\.json, packages\/tools\/package\.json and package-lock\.json were restored/);
   assert.ok(calls.some((c) => c.endsWith('--workspace packages/tools')));
   assert.equal(readFileSync(tools, 'utf8'), toolsBefore);
@@ -238,7 +248,7 @@ test('an error thrown mid-way also rolls back the earlier installs', async (t) =
     if (args[0] === 'install' && ++installs === 2) throw new Error('spawn npm ENOENT');
     return npm.exec(cmd, args, cwd);
   };
-  await assert.rejects(applyFixes(app, { lookups: LOOKUPS, exec }), /spawn npm ENOENT\nFix rolled back/);
+  await assert.rejects(applyFixes(app, { lookups: LOOKUPS, exec, verifyInstall: skipVerify }), /spawn npm ENOENT\nFix rolled back/);
   assert.equal(npm.calls.length, 1); // the first pin group ran and changed the lockfile
   assert.equal(readFileSync(join(app, 'package-lock.json'), 'utf8'), lockBefore);
 });
@@ -247,7 +257,7 @@ test('tests failing after a successful upgrade keep the changes (no rollback)', 
   const { app, evidence } = tempProject(t, { testScript: true });
   // Baseline passes, the run after the upgrade fails.
   const npm = fakeNpm(app, (args, calls) => (args[0] === 'test' && calls.filter((c) => c === 'test').length === 2 ? 1 : 0));
-  const r = await applyFixes(app, { lookups: LOOKUPS, evidenceDir: evidence, exec: npm.exec });
+  const r = await applyFixes(app, { lookups: LOOKUPS, evidenceDir: evidence, exec: npm.exec, verifyInstall: skipVerify });
   assert.equal(r.testsBefore.passed, true);
   assert.equal(r.tests.passed, false);
   assert.equal(JSON.parse(readFileSync(join(app, 'package-lock.json'), 'utf8')).changedByFakeNpm, true);
@@ -265,7 +275,7 @@ test('every grouped npm argument is still checked, and a refusal rolls back', as
   const pkgBefore = readFileSync(join(app, 'package.json'), 'utf8');
   const npm = fakeNpm(app);
   const lookups = { ...LOOKUPS, advisoryLookup: async () => ({ 'web-lib;x': [{ ghsa: 'G', severity: 'high', vulnerableVersions: '<2.0.1' }] }), versionLookup: async () => ['2.0.1'] };
-  await assert.rejects(applyFixes(app, { lookups, exec: npm.exec }), /refusing to run npm with unexpected argument "web-lib;x@2\.0\.1"[\s\S]*Fix rolled back/);
+  await assert.rejects(applyFixes(app, { lookups, exec: npm.exec, verifyInstall: skipVerify }), /refusing to run npm with unexpected argument "web-lib;x@2\.0\.1"[\s\S]*Fix rolled back/);
   assert.deepEqual(npm.calls, []);
   assert.equal(readFileSync(join(app, 'package.json'), 'utf8'), pkgBefore);
 });
@@ -317,11 +327,11 @@ test('fix drops the lock entries of nested copies an override targets, so npm re
     if (args.join(' ') === 'install --ignore-scripts') lockAtInstall.push(Object.keys(JSON.parse(readFileSync(join(dir, 'package-lock.json'), 'utf8')).packages));
     return { code: 0, output: args[0] === 'sbom' ? '{}' : 'ok' };
   };
-  const r = await applyFixes(dir, { lookups: NESTED_LOOKUPS, minPriority: 'P1', runTests: false, exec });
+  const r = await applyFixes(dir, { lookups: NESTED_LOOKUPS, minPriority: 'P1', runTests: false, exec, verifyInstall: skipVerify });
   assert.deepEqual(r.plan.actions.map((a) => a.from), [['1.0.0']]);   // the dev copy is not in the plan
   assert.deepEqual(lockAtInstall, [['', 'node_modules/a', 'node_modules/x', 'node_modules/b', 'node_modules/b/node_modules/a',
     'node_modules/b/node_modules/a/node_modules/c', 'node_modules/b/node_modules/a/node_modules/c/node_modules/x']]);
-  assert.ok(r.changes.includes('package.json overrides: "a@1.0.0" > "x": "1.0.5"'));
+  assert.ok(r.changes.includes('package.json overrides: "a" > "x": "1.0.5"'));
   assert.ok(r.changes.includes('package-lock.json: re-resolve x@1.0.0 at node_modules/a/node_modules/x'));
   assert.ok(r.changes.includes('package-lock.json: re-resolve x@1.0.1 at node_modules/b/node_modules/a/node_modules/x'));
 });
@@ -330,7 +340,7 @@ test('a failed install after dropping lock entries restores the original lockfil
   const dir = nestedProject(t);
   const lockBefore = readFileSync(join(dir, 'package-lock.json'), 'utf8');
   const exec = (cmd, args) => ({ code: args.join(' ') === 'install --ignore-scripts' ? 1 : 0, output: 'npm ERR! simulated failure' });
-  await assert.rejects(applyFixes(dir, { lookups: NESTED_LOOKUPS, runTests: false, exec }), /Fix rolled back/);
+  await assert.rejects(applyFixes(dir, { lookups: NESTED_LOOKUPS, runTests: false, exec, verifyInstall: skipVerify }), /Fix rolled back/);
   assert.equal(readFileSync(join(dir, 'package-lock.json'), 'utf8'), lockBefore);
 });
 

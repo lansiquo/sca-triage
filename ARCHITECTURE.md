@@ -48,7 +48,7 @@ flowchart TD
 | Reads | Manifests, lockfile, source | Same | Same |
 | Network | npm registry | npm registry | npm registry and npm installs |
 | Writes | Only `--markdown <file>` | Nothing | `package.json` files, `package-lock.json`, `node_modules`, evidence folder |
-| Runs project code | No | No | `npm test` before and after, unless `--no-tests` or there is no `test` script |
+| Runs project code | No | No | `npm test` before and after, unless `--no-tests` or there is no `test` script. npm reads the project's `.npmrc`; install scripts are off and `git` is always the system one |
 | Exit codes | 0 below `--fail-on`, 1 at or above, 2 error | 0, or 2 on error | 0 tests pass or unverified, 1 tests fail after the upgrade, 2 error or failed install |
 
 The GitHub Action runs `scan` only.
@@ -75,7 +75,8 @@ The JSON inventory includes the installed nodes and dependency paths used to che
 - **Target.** The smallest published, non-prerelease version above the installed one that no known advisory covers, on the same release line when one exists (same major, or same `0.minor` below 1.0.0). A target on another line is flagged as a major upgrade.
 - **Re-checks.** The registry only returns advisories for the versions it is asked about, so each new candidate target is looked up too: one batched request per round, up to 5 rounds, picking again until no target changes. A target still unconfirmed after 5 rounds is displayed with a warning and excluded from automatic fixes.
 - **Direct dependencies** are pinned with `npm install name@target --save-exact`, grouped into one install per manifest (root or workspace) and dependency type. Optional and peer declarations keep their kinds; multiple declarations are edited in place before install.
-- **Other copies** get npm `overrides`: one global entry when every installed copy is in the plan, wants the same target and none is a direct dependency; otherwise entries scoped to the parent package name and version. Conflicts and unintended rewrites of unrelated copies stop planning. A package whose range excludes a pinned target (for example `express` requiring `body-parser` 1.18.3) gets a scoped override too.
+- **Other copies** get npm `overrides`: one global entry when every installed copy is in the plan, wants the same target and none is a direct dependency; otherwise entries scoped to the packages that require each copy, by name. A package whose range excludes a pinned target (for example `express` requiring `body-parser` 1.18.3) gets a scoped override too. Keys are plain names because npm 10 does not reliably apply version-qualified keys (`"parent@1.0.0"`).
+- **Manual upgrades.** An override applies to every version of its parent and to that parent's whole subtree. Before anything is installed, each override is checked against every installed copy it would reach: a copy outside the plan may only be moved up to the target on the same release line. An upgrade whose override would change anything else, or that needs two versions under one key, is not applied; `plan` and `fix` list it under "Needs a manual upgrade" with the reason, and the rest are applied.
 - **Stale copies.** npm keeps a locked nested copy that an override rejects and lists it as invalid. Before the overrides install, `fix` removes the lock entries of every nested copy an override covers that is not at the override's version, so npm resolves them again.
 - **Bundled copies** ship inside the tarball of the package above them, which npm overrides cannot change. They get no pin or override; `scan` shows "bundled in <package>: upgrade <package>", and `plan` and `fix` list them grouped by that package. A copy bundled by the project itself is fixed normally.
 - **Scope.** All priorities are planned unless `--min-priority` narrows it.
@@ -90,7 +91,8 @@ The JSON inventory includes the installed nodes and dependency paths used to che
 ## Failure handling
 
 - **Fail closed.** A registry error after retries, or a response that is not the documented shape, stops the command with exit code 2; it never becomes "no advisories". An advisory range the tool cannot parse counts as vulnerable, with a warning. Import detection leans toward "loaded" when unsure, since a missed import would hide a reachable vulnerability below the gate.
-- **Rollback.** If an install step, or anything else before the post-upgrade tests, fails, `fix` restores `package.json`, every workspace manifest a pin targeted and `package-lock.json`, records the failed command in `REPORT.md` and exits 2. `node_modules` is not restored; run `npm ci`.
+- **Install check.** After the installs, every manifest and package that used a planned copy must resolve to the target, as the same registry package. If not (npm kept an old copy, or resolved an alias to another package), the install counts as failed and is rolled back before the tests.
+- **Rollback.** If an install step, the install check, or anything else before the post-upgrade tests, fails, `fix` restores `package.json`, every workspace manifest a pin targeted and `package-lock.json`, records the failed command in `REPORT.md` and exits 2. `node_modules` is not restored; run `npm ci`.
 - **Failing tests** after a clean upgrade keep the changes and exit 1, with both test logs in the evidence folder. If the tests also failed before the upgrade, the output says so.
 - **Unverified upgrades.** With `--no-tests` or no `test` script, changes are applied and marked unverified in the output and `REPORT.md`.
 
@@ -98,7 +100,8 @@ The JSON inventory includes the installed nodes and dependency paths used to che
 
 - No third-party dependencies; Node.js built-ins only.
 - npm calls go through an argument allowlist, installs use `--ignore-scripts`, and npm's fund, audit and update-notifier messages are turned off.
-- Source scanning: files under 2 MB, `node_modules` and `.git` skipped everywhere and build output folders at the project root, symlinks followed only inside the project, and a linear tokenizer with set-based evidence deduplication.
+- Source scanning: files under 2 MB (larger ones are named in a warning), `node_modules` and `.git` skipped everywhere and build output folders at the project root, symlinks followed only inside the project with each file read once and classified by its real path, and a linear tokenizer with set-based evidence deduplication.
+- Lockfile: each registry entry's name and version must match its tarball URL, so an edited entry can't make the scan check a different package than npm installs.
 - Output: untrusted names and paths are escaped in Markdown, and terminal control characters are replaced in console output.
 - Evidence: `REPORT.md`, `before.json` and `after.json`, both lockfiles, both test logs and a CycloneDX SBOM from `npm sbom`.
 
@@ -113,7 +116,10 @@ The JSON inventory includes the installed nodes and dependency paths used to che
 ## Audit hardening
 
 Baseline evidence is persisted before mutation. npm stdout and stderr are captured to separate
-temporary files, avoiding pipe-buffer termination and keeping SBOM JSON valid. Successful installs
-are verified against the resulting lockfile. A post-install verification error preserves the
-changes and writes an explicit incomplete-verification report, logs and recovery snapshots.
-The CLI lets stdout/stderr drain naturally and sanitizes errors as well as normal terminal output.
+temporary files, avoiding pipe-buffer termination and keeping SBOM JSON valid. Installs are checked
+against the resulting lockfile before the tests and rolled back if they don't match the plan. A
+failure after the tests (the rescan) keeps the tested changes and writes an explicit
+incomplete-verification report, logs and recovery snapshots. The CLI lets stdout/stderr drain
+naturally and sanitizes errors as well as normal terminal output; continuation lines are indented,
+so project text can't start a line with a GitHub Actions workflow command, and the Action stops
+workflow commands while the scan prints.

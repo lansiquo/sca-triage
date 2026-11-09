@@ -19,9 +19,13 @@ runs:
         SCA_PATH: ${{ inputs.path }}
         SCA_FAIL_ON: ${{ inputs.fail-on }}
       run: |
+        # The output includes names from the scanned project: stop workflow commands while it prints.
+        token="sca-triage-$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+        echo "::stop-commands::$token"
         set +e
         node "$GITHUB_ACTION_PATH/bin/sca-triage.js" scan "$SCA_PATH" --fail-on "$SCA_FAIL_ON" --markdown "$RUNNER_TEMP/sca-triage.md"
         code=$?
         set -e
+        echo "::$token::"
         [ -f "$RUNNER_TEMP/sca-triage.md" ] && cat "$RUNNER_TEMP/sca-triage.md" >> "$GITHUB_STEP_SUMMARY"
         exit $code

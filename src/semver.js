@@ -68,19 +68,27 @@ function matchesComparator(version, comparator) {
   }
 }
 
-// True if `version` is inside `range`. Ranges are OR-ed sets of AND-ed comparators.
+// True if `version` is inside `range`. Ranges are OR-ed sets of AND-ed comparators. Real
+// advisories also use partial versions (">=13.0 <14.2.30", ">0 <=5.10.9"), which npm reads as
+// ">=13.0.0" and ">=1.0.0"; anything unreadable throws.
 export function satisfies(version, range) {
   const r = String(range).trim();
   if (r === '' || r === '*') return true;
-  return r.split('||').some((set) => {
-    // Join operators to their versions: ">= 1.0.0" -> ">=1.0.0"
-    const parts = set.trim().replace(/(<=|>=|<|>|=)\s+/g, '$1').split(/\s+/).filter(Boolean);
-    return parts.every((p) => matchesComparator(version, p));
-  });
+  return r.split('||').some((set) => comparators(set).every((c) => matchesComparator(version, c)));
 }
 
+// One "||" alternative -> plain comparators: operators joined to their versions (">= 1.0.0"),
+// hyphen ranges ("1.0.0 - 1.2.0"), and each token expanded (partial versions, ^, ~, x).
+function comparators(set) {
+  const t = set.trim();
+  const hyphen = t.match(/^(\S+)\s+-\s+(\S+)$/);
+  if (hyphen) return [...expand(`>=${hyphen[1]}`), ...expand(`<=${hyphen[2]}`)];
+  return t.replace(/(<=|>=|<|>|=|~|\^)\s+/g, '$1').split(/\s+/).filter(Boolean).flatMap(expand);
+}
+
+// Registry keys are untrusted: " 1.0.1\n" parses, so the trimmed form is what callers get.
 export function sortVersions(versions) {
-  return [...versions].filter((v) => parse(v)).sort(compare);
+  return [...versions].map((v) => String(v).trim()).filter((v) => parse(v)).sort(compare);
 }
 
 // The release line a version belongs to under npm's caret rules: "2" for 2.x.y,
@@ -102,13 +110,7 @@ export function acceptsVersion(spec, version) {
   if (s === '' || s === '*' || s === 'x' || s === 'latest') return s === 'latest' ? null : true;
   if (/[^0-9A-Za-z.<>=~^*|\s-]/.test(s) || /^[a-z]/i.test(s.replace(/^v/, ''))) return null;
   try {
-    return s.split('||').some((set) => {
-      const t = set.trim();
-      const hyphen = t.match(/^(\S+)\s+-\s+(\S+)$/);
-      if (hyphen) return expand(`>=${hyphen[1]}`).every((c) => matchesComparator(version, c)) && expand(`<=${hyphen[2]}`).every((c) => matchesComparator(version, c));
-      const parts = t.replace(/(<=|>=|<|>|=|~|\^)\s+/g, '$1').split(/\s+/).filter(Boolean);
-      return parts.every((p) => expand(p).every((c) => matchesComparator(version, c)));
-    });
+    return s.split('||').some((set) => comparators(set).every((c) => matchesComparator(version, c)));
   } catch {
     return null;
   }

@@ -134,8 +134,8 @@ test('0.x minor bumps count as crossing a major', () => {
 
 test('an advisory range the parser cannot read counts as vulnerable, with a warning', async () => {
   const warnings = [];
-  assert.equal(affects('1.0.0', '1.0.0 - 1.2.0', warnings, 'G1'), true);
-  assert.match(warnings[0], /G1: unsupported range comparator: "-"; treating it as vulnerable/);
+  assert.equal(affects('1.0.0', '~>1.0.0', warnings, 'G1'), true);
+  assert.match(warnings[0], /G1: unsupported range: "~>1\.0\.0"; treating it as vulnerable/);
   const r = await triage(FIXTURE, {
     advisoryLookup: async () => ({ parser: [{ ghsa: 'G2', severity: 'high', vulnerableVersions: '>=1.0.0, <1.0.3' }] }),
     versionLookup: async () => ['1.0.3'],

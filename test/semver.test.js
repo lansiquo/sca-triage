@@ -21,11 +21,20 @@ test('matches the range syntax npm advisories use', () => {
 });
 
 test('rejects range syntax it does not understand instead of guessing', () => {
-  assert.throws(() => satisfies('1.0.0', '^1.0.0'), /unsupported range/);
+  assert.throws(() => satisfies('1.0.0', '~>1.0.0'), /unsupported range/);
+});
+
+test('reads the partial versions and hyphen ranges real advisories use', () => {
+  // next GHSA-3h52-269p-cp9r and tinymce GHSA-vg35-5wq7-3x7w: unreadable before, so no upgrade was ever safe.
+  for (const [version, range, inside] of [
+    ['14.2.29', '>=13.0 <14.2.30', true], ['13.0.0', '>=13.0 <14.2.30', true], ['15.5.28', '>=13.0 <14.2.30', false],
+    ['5.10.9', '>0 <=5.10.9', true], ['0.9.0', '>0 <=5.10.9', false], ['8.9.3', '>0 <=5.10.9', false],
+    ['1.1.0', '1.0.0 - 1.2.0', true], ['1.3.0', '1.0.0 - 1.2.0', false],
+  ]) assert.equal(satisfies(version, range), inside, `${version} in ${range}`);
 });
 
 test('sorts and drops invalid versions', () => {
-  assert.deepEqual(sortVersions(['1.10.0', 'garbage', '1.2.0', '1.9.3']), ['1.2.0', '1.9.3', '1.10.0']);
+  assert.deepEqual(sortVersions(['1.10.0', 'garbage', '1.2.0', '1.9.3', '\r\n 2.0.0\n']), ['1.2.0', '1.9.3', '1.10.0', '2.0.0']);
 });
 
 test('release lines follow npm caret rules below 1.0.0', async () => {

@@ -62,7 +62,34 @@ function validateManifest(value, label) {
     }
   }
 }
-const safePath = (path) => !path.startsWith('/') && !path.includes('\\') && !path.split('/').some((p) => p === '..' || p === '.');
+// Lockfile keys are relative POSIX paths. npm writes "../shared" for a file: dependency outside
+// the project, so leading ".." segments are allowed; nothing else may climb, or repeat a slash.
+function safePath(path) {
+  if (path === '') return true;
+  if (path.startsWith('/') || path.includes('\\')) return false;
+  const segs = path.split('/');
+  let i = 0;
+  while (segs[i] === '..') i++;
+  return i < segs.length && segs.slice(i).every((p) => p && p !== '.' && p !== '..');
+}
+const outside = (path) => path === '..' || path.startsWith('../');
+
+// A registry tarball URL names the package and version inside it (".../@s/x/-/x-1.2.3.tgz").
+// An entry that claims another name or version would make the scan check the wrong package
+// while npm installs the tarball.
+const TARBALL = /\/((?:@[^/]+\/)?[^/]+)\/-\/([^/?#]+)\.tgz(?:[?#].*)?$/;
+function tarballMismatch(entry, realName) {
+  if (typeof entry.resolved !== 'string') return false;
+  const m = TARBALL.exec(entry.resolved);
+  if (!m) return false;
+  let name;
+  try {
+    name = decodeURIComponent(m[1]);
+  } catch {
+    return true;
+  }
+  return name !== realName || m[2] !== `${name.split('/').pop()}-${entry.version}`;
+}
 
 export function loadProject(dir) {
   const pkgPath = join(dir, 'package.json');
@@ -95,6 +122,12 @@ export function loadProject(dir) {
   const workspaces = [];
   for (const [path, entry] of Object.entries(lock.packages)) {
     if (!path || path.includes('node_modules/') || !entry || typeof entry !== 'object') continue;
+    // A file: dependency outside the project: its lockfile entry describes it, and it is not
+    // a workspace (nothing is pinned in its manifest, and it isn't read from disk).
+    if (outside(path)) {
+      manifestData.set(path, entry);
+      continue;
+    }
     workspaces.push(path);
     const file = join(dir, path, 'package.json');
     if (!existsSync(file)) throw new Error(`missing local package manifest ${path}/package.json`);
@@ -132,6 +165,9 @@ export function loadProject(dir) {
       declaredBy: [],
     };
     item.aliased = item.realName !== item.name;
+    if (tarballMismatch(entry, item.realName)) {
+      throw new Error(`lockfile entry ${path} says ${item.realName}@${item.version}, but npm installs ${entry.resolved}`);
+    }
     // What project or workspace code gets from require(name): the copy directly in its node_modules.
     item.topLevel = manifests.has(item.owner);
     installs.push(item);
@@ -161,13 +197,15 @@ export function loadProject(dir) {
     }
   }
 
+  // Optional dependencies may be absent, and so may peers: npm doesn't install them with
+  // legacy-peer-deps. A file: dependency outside the project gets no installs of its own.
   const missingAllowed = (entry, name) => Object.hasOwn(entry.optionalDependencies || {}, name)
-    || (Object.hasOwn(entry.peerDependencies || {}, name) && entry.peerDependenciesMeta?.[name]?.optional === true);
+    || Object.hasOwn(entry.peerDependencies || {}, name);
   for (const [path, item] of byPath) {
     const entry = manifestData.get(path) || lock.packages[path];
     for (const name of item.dependsOn) {
       const next = resolve(path, name);
-      if (!next && !missingAllowed(entry, name)) throw new Error(`incomplete lockfile: ${path || '(root)'} requires missing dependency ${name}`);
+      if (!next && !outside(path) && !missingAllowed(entry, name)) throw new Error(`incomplete lockfile: ${path || '(root)'} requires missing dependency ${name}`);
       if (next) item.dependencyPaths.push(next.path);
     }
   }

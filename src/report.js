@@ -53,6 +53,16 @@ export function formatBundled(findings) {
   ];
 }
 
+// Plan and fix output: upgrades fix leaves alone because no npm override can change only
+// those copies (see planFixes), with the reason.
+export function formatManual(manual = []) {
+  if (!manual.length) return [];
+  return [
+    'Needs a manual upgrade (an npm override would change more than these copies):',
+    ...manual.map(({ action: a, reason }) => `  ${plain(displayName({ package: a.package, installedAs: a.name }))} ${plain([...new Set(a.from)].join(', '))} -> ${a.target}: ${plain(reason)}`),
+  ];
+}
+
 export function upgradeText(f, esc = plain) {
   if (f.bundledIn) return `bundled in ${esc(`${f.bundledIn.name}@${f.bundledIn.version}`)}: upgrade ${esc(f.bundledIn.name)}`;
   if (!f.fix.target) return 'no fixed version published';
@@ -135,6 +145,10 @@ export function formatMarkdown(before, after, extras = {}) {
   }
   if (extras.changes?.length) {
     out.push('', '## Changes applied', '', ...extras.changes.map((c) => `- ${codeSpan(c)}`));
+  }
+  if (extras.manual?.length) {
+    out.push('', '## Needs a manual upgrade', '', 'An npm override would change more than these copies, so `fix` left them as they are:', '',
+      ...extras.manual.map(({ action: a, reason }) => `- ${codeSpan(`${displayName({ package: a.package, installedAs: a.name })}@${[...new Set(a.from)].join(', ')}`)} -> ${escapeMarkdown(a.target)}: ${escapeMarkdown(reason)}`));
   }
   if (extras.verificationError) {
     out.push('', '## Verification FAILED: applied changes preserved', '',

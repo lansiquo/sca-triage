@@ -4,7 +4,7 @@
 
 import { loadProject } from './lockfile.js';
 import { fetchAdvisories, fetchVersions, severityRank } from './advisories.js';
-import { findImports, resolveImports, classify, REACHABILITY_RANK } from './reachability.js';
+import { findImports, resolveImports, classify, REACHABILITY_RANK, MAX_FILE_BYTES } from './reachability.js';
 import { satisfies, compare, parse, isPrerelease, sortVersions, releaseLine } from './semver.js';
 
 // satisfies(), but a range or version this tool can't parse counts as a match, with a
@@ -86,7 +86,8 @@ const VERSION_LOOKUP_CONCURRENCY = 8;
 
 export async function triage(projectDir, { advisoryLookup = fetchAdvisories, versionLookup = fetchVersions } = {}) {
   const project = loadProject(projectDir);
-  const imports = resolveImports(project, findImports(projectDir, { workspaces: project.workspaces }));
+  const sources = findImports(projectDir, { workspaces: project.workspaces });
+  const imports = resolveImports(project, sources);
   // Advisories and versions are looked up by the real package name ("lodash" for
   // "foo": "npm:lodash@..."); reachability uses the installed name.
   const lookup = async (installs) => {
@@ -116,7 +117,7 @@ export async function triage(projectDir, { advisoryLookup = fetchAdvisories, ver
   const copiesByName = new Map();
   for (const i of project.installs) copiesByName.set(i.name, (copiesByName.get(i.name) || 0) + 1);
 
-  const warnings = [];
+  const warnings = sources.skipped.map((file) => `${file} is larger than ${MAX_FILE_BYTES / 1e6} MB, so its imports were not read: packages it loads may rank too low`);
   const findings = [];
   // First pass: which installs an advisory affects. Then look up published versions for
   // those packages (each name once, a few at a time) before building the findings.

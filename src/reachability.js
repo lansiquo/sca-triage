@@ -11,7 +11,7 @@ import { readdirSync, readFileSync, lstatSync, statSync, realpathSync, openSync,
 import { join, relative, resolve, sep, posix } from 'node:path';
 
 const SOURCE_EXT = /\.(?:(?:c|m)?(?:j|t)sx?|vue|svelte|astro)$/;
-const MAX_FILE_BYTES = 2_000_000;
+export const MAX_FILE_BYTES = 2_000_000;
 // Never source code, wherever they appear.
 const SKIP_ANYWHERE = new Set(['node_modules', '.git']);
 // Build output and tool output, skipped only at the top of the project or a workspace,
@@ -89,8 +89,19 @@ function walk(dir, ctx, out) {
       continue;
     }
     if (st.isDirectory()) walk(full, ctx, out);
-    else if (st.isFile() && st.size < MAX_FILE_BYTES && (SOURCE_EXT.test(entry) || (!entry.includes('.') && hasNodeShebang(full)))) {
-      out.push(full);
+    else if (st.isFile() && (SOURCE_EXT.test(entry) || (!entry.includes('.') && hasNodeShebang(full)))) {
+      // Each file once, by its real path: that is where Node resolves its imports from, and
+      // it decides runtime vs test code (a test folder that links to src/ doesn't make src/ tests).
+      let real;
+      try {
+        real = realpathSync(full);
+      } catch {
+        continue;
+      }
+      if (ctx.seen.has(real)) continue;
+      ctx.seen.add(real);
+      if (st.size < MAX_FILE_BYTES) out.push(real);
+      else ctx.skipped.push(real);
     }
   }
   return out;
@@ -224,9 +235,13 @@ export function findImports(projectDirArg, { workspaces = [] } = {}) {
     realRoot: realpathSync(projectDir),
     roots: new Set(workspaceRoots.map((w) => (w ? join(projectDir, ...w.split('/')) : projectDir))),
     seen: new Set([realpathSync(projectDir)]),
+    skipped: [],
   };
-  for (const file of walk(projectDir, ctx, [])) {
-    const rel = relative(projectDir, file).split(sep).join('/');
+  const files = walk(projectDir, ctx, []);
+  // Files too large to read: their imports are not counted, so the caller warns about them.
+  found.skipped = ctx.skipped.map((file) => relative(ctx.realRoot, file).split(sep).join('/'));
+  for (const file of files) {
+    const rel = relative(ctx.realRoot, file).split(sep).join('/');
     const kind = isTestPath(rel, workspaceRoots) ? 'test' : 'runtime';
     const text = readFileSync(file, 'utf8');
     for (const { name, line } of specifiers(text)) {

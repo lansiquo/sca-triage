@@ -81,6 +81,18 @@ test('stays linear on hostile input (no ReDoS)', (t) => {
   assert.ok(ms < 1000, `took ${ms.toFixed(0)} ms`);
 });
 
+test('files count by their real location, and files too large to read are reported', (t) => {
+  const dir = tempProject(t);
+  mkdirSync(join(dir, 'src'));
+  writeFileSync(join(dir, 'src/index.js'), "require('vuln');\n");
+  mkdirSync(join(dir, '__tests__'));
+  symlinkSync('../src', join(dir, '__tests__', 'src')); // walked first, but it is src/
+  writeFileSync(join(dir, 'big.js'), `require('hidden');\n/*${'x'.repeat(2_000_000)}*/\n`);
+  const imports = findImports(dir);
+  assert.deepEqual(imports.get('vuln'), { runtime: ['src/index.js:1'], test: [] });
+  assert.deepEqual(imports.skipped, ['big.js']);
+});
+
 test('ignores URL-style and subpath-import specifiers', () => {
   assert.equal(packageNameFromSpecifier('node:fs'), null);
   assert.equal(packageNameFromSpecifier('https://example.com/x.js'), null);

@@ -55,15 +55,17 @@ test('F01: missing option values and invalid priorities fail before reading or m
   assert.throws(() => planFixes({ findings: [] }, { minPriority: 'garbage' }), /must be one of/);
 });
 
-test('F03: parent versions isolate targets and ambiguous assignments fail before a merge', () => {
+test('F03: two versions of one parent that need different targets are left for a manual upgrade', () => {
+  // npm 10 does not reliably apply "parent@version" keys, and one "parent" key can hold one version.
   const result = { findings: [
     finding({ path: 'node_modules/a/node_modules/x', requiredEdges: [{ by: 'parent', version: '1.0.0', path: 'node_modules/a', spec: '1.0.0' }] }),
     finding({ version: '2.0.0', path: 'node_modules/b/node_modules/x', requiredEdges: [{ by: 'parent', version: '2.0.0', path: 'node_modules/b', spec: '2.0.0' }], fix: { target: '2.0.1' } }),
   ] };
-  const actions = planFixes(result).actions;
-  assert.deepEqual(applyOverrides({}, actions).overrides, { 'parent@1.0.0': { x: '1.0.1' }, 'parent@2.0.0': { x: '2.0.1' } });
-  result.findings[1].requiredEdges[0].version = '1.0.0';
-  assert.throws(() => planFixes(result), /conflicting upgrade targets/);
+  const plan = planFixes(result);
+  assert.deepEqual(plan.actions, []);
+  assert.deepEqual(plan.manual.map((m) => m.reason), Array(2).fill('the override "parent" > "x" would need several versions (1.0.1, 2.0.1)'));
+  // Entries that can't be told apart are refused, never last-one-wins.
+  assert.throws(() => applyOverrides({}, [{ overrides: [{ scope: 'p', name: 'x', spec: '1.0.1' }] }, { overrides: [{ scope: 'p', name: 'x', spec: '2.0.1' }] }]), /conflicting/);
 });
 
 test('F04: identical workspace aliases retain distinct registry identities', () => {
@@ -96,6 +98,24 @@ test('F06: malformed and incomplete inventories fail, absent optional dependenci
   ]) { json(join(dir, 'package-lock.json'), lock); assert.throws(() => loadProject(dir), /lockfile|lockfile entry/); }
   const optional = project(t, { optionalDependencies: { absent: '*' }, peerDependencies: { peer: '*' }, peerDependenciesMeta: { peer: { optional: true } } }, {});
   assert.equal(loadProject(optional).installs.length, 0);
+});
+
+test('lockfiles real npm writes still load: peers left out by legacy-peer-deps, file: folders outside the project', (t) => {
+  const peers = project(t, { dependencies: { a: '1.0.0' } }, { 'node_modules/a': { version: '1.0.0', peerDependencies: { p: '^1.0.0' } } });
+  assert.equal(loadProject(peers).installs.length, 1);
+  const linked = project(t, { dependencies: { shared: 'file:../shared' } }, {
+    '../shared': { version: '1.0.0', dependencies: { c: '1.0.0' } }, 'node_modules/shared': { resolved: '../shared', link: true },
+  });
+  assert.equal(loadProject(linked).installs.length, 0);
+});
+
+test('an entry whose name or version is not what its registry tarball contains is rejected', (t) => {
+  const tgz = 'https://registry.npmjs.org/x/-/x-1.0.0.tgz';
+  for (const entry of [{ version: '1.0.1', resolved: tgz }, { name: 'not-x', version: '1.0.0', resolved: tgz }]) {
+    assert.throws(() => loadProject(project(t, { dependencies: { x: '1.0.0' } }, { 'node_modules/x': entry })), /but npm installs/);
+  }
+  const scoped = { name: '@s/real', version: '2.0.0', resolved: 'https://registry.npmjs.org/@s/real/-/real-2.0.0.tgz' };
+  assert.equal(loadProject(project(t, { dependencies: { x: 'npm:@s/real@2.0.0' } }, { 'node_modules/x': scoped })).installs[0].realName, '@s/real');
 });
 
 test('F07: missing or unsupported severity is an input error', () => {
@@ -208,5 +228,7 @@ test('override coverage rejects an unrelated safe copy on a different release li
     { name: 'x', realName: 'x', version: '1.0.0', path: 'node_modules/x', dependencyPaths: [] },
     { name: 'x', realName: 'x', version: '2.0.1', path: 'node_modules/helper/node_modules/x', dependencyPaths: [] },
   ];
-  assert.throws(() => planFixes({ findings: [selected], inventory }), /unrelated copy/);
+  const plan = planFixes({ findings: [selected], inventory });
+  assert.deepEqual(plan.actions, []);
+  assert.match(plan.manual[0].reason, /"parent" > "x" would also change x@2\.0\.1 at node_modules\/helper\/node_modules\/x/);
 });
