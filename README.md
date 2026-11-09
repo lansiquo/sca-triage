@@ -60,6 +60,47 @@ packages with none vulnerable, the 5 functional tests still pass, and the lab's 
 prototype-pollution test (GHSA-xvch-5gv4-984h) goes from failing to passing. The
 [CI lab gate](.github/workflows/ci.yml) checks this on every push to `main` and every pull request.
 
+## On a real project: OWASP NodeGoat
+
+Beyond the lab, I scanned [OWASP NodeGoat](https://github.com/OWASP/NodeGoat) at commit `c5cb68a`,
+a deliberately vulnerable Node.js app with 1,479 locked packages. The scan only reads its lockfile
+and source; nothing from NodeGoat is installed or run. From the folder containing `sca-triage`:
+
+```bash
+git clone https://github.com/OWASP/NodeGoat.git
+git -C NodeGoat checkout c5cb68a
+node sca-triage/bin/sca-triage.js scan NodeGoat
+```
+
+One line per P1 finding (counts and versions follow the advisory database at scan time):
+
+```text
+owasp-nodejs-goat: 1479 packages scanned, 180 vulnerable (P1: 13, P2: 123, P3: 44)
+
+[P1] bson@1.0.9            CRITICAL  via mongodb                         fix: 1.1.4 (override)
+[P1] minimist@0.0.10       CRITICAL  via swig                            fix: 0.2.4 (major, override)
+[P1] proxy-addr@2.0.4      CRITICAL  via express                         fix: 2.0.8 (override)
+[P1] underscore@1.9.1      CRITICAL  imported (config/config.js:1)       fix: 1.13.8
+[P1] body-parser@1.18.3    HIGH      imported (server.js:5)              fix: 1.20.9
+[P1] debug@2.2.0           HIGH      via helmet                          fix: 2.6.9 (override)
+[P1] marked@0.3.5          HIGH      imported (server.js:13)             fix: 4.0.10 (major)
+[P1] mongodb@2.2.36        HIGH      imported (artifacts/db-reset.js:9)  fix: 3.1.13 (major)
+[P1] path-to-regexp@0.1.7  HIGH      via express                         fix: 0.1.13 (override)
+[P1] qs@6.5.2              HIGH      via body-parser                     fix: 6.16.1 (override)
+[P1] semver@5.6.0          HIGH      via mongodb                         fix: 5.7.2 (override)
+[P1] swig@1.4.2            HIGH      imported (server.js:9)              fix: none published
+[P1] uglify-js@2.4.24      HIGH      via swig                            fix: 2.6.0 (override)
+
+… 123 P2 and 44 P3 findings omitted
+
+Gate (--fail-on P1): FAIL
+```
+
+The scan matches 437 advisories across 180 vulnerable packages and narrows "fix now" to 13 P1
+packages the app loads, either directly or through an imported dependency such as `express` or
+`mongodb`. Transitive packages are fixed with npm `overrides`. `swig` has no fixed release, so it
+needs replacing rather than upgrading.
+
 ## Use it on your project
 
 Requires Node.js 20 or newer and access to `registry.npmjs.org`. A scan reads `package.json` and
