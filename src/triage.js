@@ -1,5 +1,6 @@
 // Turn an inventory + advisories + import evidence into ranked findings, each with
-// the smallest upgrade that clears every known advisory for that package.
+// the smallest upgrade that clears every known advisory for that package, including
+// advisories that only affect versions newer than the installed one.
 
 import { loadProject } from './lockfile.js';
 import { fetchAdvisories, fetchVersions, severityRank } from './advisories.js';
@@ -35,7 +36,9 @@ export function priorityRank(p) {
   return PRIORITY_RANK[p] || 0;
 }
 
-// Smallest published, non-prerelease version above `current` that no advisory covers.
+// Smallest published, non-prerelease version above `current` that none of `advisories`
+// covers. triage() keeps adding the advisories it finds for candidate targets and calls
+// this again, so the result is clean under every advisory it has seen.
 // Prefers staying on the same release line (same major, or same 0.minor below 1.0.0),
 // since that is least likely to break callers. `crossesMajor` means the target is on
 // another line: a breaking upgrade under npm's caret rules.
@@ -52,16 +55,41 @@ export function pickSafeVersion(current, versions, advisories, warnings) {
   return { target, crossesMajor: releaseLine(target) !== line };
 }
 
+// How many extra advisory lookups triage makes to check candidate upgrade targets.
+export const MAX_TARGET_CHECKS = 5;
+
+function advisoryKey(a) {
+  return `${a.ghsa}\u0000${a.vulnerableVersions}`;
+}
+
 export async function triage(projectDir, { advisoryLookup = fetchAdvisories, versionLookup = fetchVersions } = {}) {
   const project = loadProject(projectDir);
   const imports = findImports(projectDir, { workspaces: project.workspaces });
   // Advisories and versions are looked up by the real package name ("lodash" for
   // "foo": "npm:lodash@..."); reachability uses the installed name.
-  const advisoriesByName = await advisoryLookup(project.installs.map((i) => ({ name: i.realName, version: i.version })));
-  const advisoriesFor = (name) =>
-    advisoriesByName instanceof Map
-      ? advisoriesByName.get(name) || []
-      : (advisoriesByName && Object.hasOwn(advisoriesByName, name) && advisoriesByName[name]) || [];
+  const lookup = async (installs) => {
+    const res = await advisoryLookup(installs);
+    return (name) =>
+      res instanceof Map ? res.get(name) || [] : (res && Object.hasOwn(res, name) && res[name]) || [];
+  };
+  const advisoriesFor = await lookup(project.installs.map((i) => ({ name: i.realName, version: i.version })));
+
+  // Every advisory seen for a package, from the installed versions and from any
+  // candidate target checked below. A target must be clear of all of them.
+  const known = new Map(); // realName -> Map(key -> advisory)
+  const addKnown = (name, list) => {
+    if (!known.has(name)) known.set(name, new Map());
+    const seen = known.get(name);
+    let added = 0;
+    for (const a of list) {
+      if (!seen.has(advisoryKey(a))) {
+        seen.set(advisoryKey(a), a);
+        added++;
+      }
+    }
+    return added;
+  };
+  const knownFor = (name) => [...(known.get(name)?.values() || [])];
 
   const copiesByName = new Map();
   for (const i of project.installs) copiesByName.set(i.name, (copiesByName.get(i.name) || 0) + 1);
@@ -71,13 +99,13 @@ export async function triage(projectDir, { advisoryLookup = fetchAdvisories, ver
   const versionCache = new Map();
   for (const install of project.installs) {
     const all = advisoriesFor(install.realName);
+    addKnown(install.realName, all);
     const affecting = all.filter((a) => affects(install.version, a.vulnerableVersions, warnings, `${a.ghsa} (${install.realName}@${install.version})`));
     if (!affecting.length) continue;
 
     const reach = classify(install, imports);
     const maxSeverity = affecting.reduce((s, a) => (severityRank(a.severity) > severityRank(s) ? a.severity : s), 'info');
     if (!versionCache.has(install.realName)) versionCache.set(install.realName, await versionLookup(install.realName));
-    const fix = pickSafeVersion(install.version, versionCache.get(install.realName), all, warnings);
 
     findings.push({
       package: install.realName,
@@ -95,8 +123,41 @@ export async function triage(projectDir, { advisoryLookup = fetchAdvisories, ver
       severity: maxSeverity,
       priority: priorityFor(maxSeverity, reach.level),
       advisories: affecting.sort((a, b) => severityRank(b.severity) - severityRank(a.severity)),
-      fix,
+      fix: null,
     });
+  }
+
+  // The registry returns only the advisories that affect the versions it is asked
+  // about, so an advisory that starts above the installed version (say >=2.29.2 <2.31.0
+  // for an install at 2.29.1) is invisible until a candidate target is queried. Pick a
+  // target, ask the registry about every new target in one batched lookup, and pick
+  // again with whatever turned up, until no target changes.
+  const pick = () => {
+    for (const f of findings) f.fix = pickSafeVersion(f.version, versionCache.get(f.package), knownFor(f.package), warnings);
+  };
+  pick();
+  const checked = new Set(); // "name@target" pairs already sent to the registry
+  const pairKey = (f) => `${f.package}@${f.fix.target}`;
+  for (let round = 0; round < MAX_TARGET_CHECKS; round++) {
+    const query = [];
+    for (const f of findings) {
+      if (!f.fix.target || checked.has(pairKey(f))) continue;
+      checked.add(pairKey(f));
+      query.push({ name: f.package, version: f.fix.target });
+    }
+    if (!query.length) break;
+    const found = await lookup(query);
+    let added = 0;
+    for (const name of new Set(query.map((q) => q.name))) added += addKnown(name, found(name));
+    if (!added) break;
+    pick();
+  }
+  for (const f of findings) {
+    if (f.fix.target && !checked.has(pairKey(f))) {
+      warnings.push(
+        `${f.package}@${f.version}: upgrade target ${f.fix.target} was not checked against the registry after ${MAX_TARGET_CHECKS} lookups; it may still be vulnerable`,
+      );
+    }
   }
 
   findings.sort(

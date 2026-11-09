@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import { loadProject } from '../src/lockfile.js';
 import { findImports, classify, packageNameFromSpecifier } from '../src/reachability.js';
-import { triage, pickSafeVersion, priorityFor, gateFails, affects } from '../src/triage.js';
+import { triage, pickSafeVersion, priorityFor, gateFails, affects, MAX_TARGET_CHECKS } from '../src/triage.js';
 import { planFixes, applyFixes } from '../src/fix.js';
 import { formatMarkdown } from '../src/report.js';
 
@@ -144,4 +144,83 @@ test('an advisory range the parser cannot read counts as vulnerable, with a warn
   assert.ok(r.warnings.some((w) => w.includes('G2')));
   // No version can be proven safe from an unreadable range.
   assert.equal(r.findings[0].fix.target, null);
+});
+
+// A stand-in for the registry's bulk endpoint: like the real one, it returns only the
+// advisories that affect at least one of the versions asked about.
+function bulkRegistry(db, calls = []) {
+  return async (installs) => {
+    calls.push(installs.map((i) => `${i.name}@${i.version}`));
+    const out = {};
+    for (const { name, version } of installs) {
+      for (const a of db[name] || []) {
+        if (!affects(version, a.vulnerableVersions)) continue;
+        out[name] ||= [];
+        if (!out[name].includes(a)) out[name].push(a);
+      }
+    }
+    return out;
+  };
+}
+
+// The real moment advisories and published versions around 2.29.x.
+const MOMENT = {
+  moment: [
+    { ghsa: 'GHSA-8hfj-j24r-96c4', severity: 'high', vulnerableVersions: '<2.29.2' },
+    { ghsa: 'GHSA-wc69-rhjr-hc9g', severity: 'high', vulnerableVersions: '>=2.18.0 <2.29.4' },
+    { ghsa: 'GHSA-4p3w-j4w9-5jqw', severity: 'moderate', vulnerableVersions: '>=2.29.2 <2.31.0' },
+  ],
+};
+const MOMENT_VERSIONS = ['2.29.0', '2.29.1', '2.29.2', '2.29.3', '2.29.4', '2.30.0', '2.30.1', '2.31.0'];
+
+test('the upgrade target is checked against advisories that only affect newer versions', async () => {
+  const calls = [];
+  const r = await triage(fileURLToPath(new URL('./fixtures/moment', import.meta.url)), {
+    advisoryLookup: bulkRegistry(MOMENT, calls),
+    versionLookup: async () => MOMENT_VERSIONS,
+  });
+  const [f] = r.findings;
+  // The installed version is hit by two advisories; 2.29.4 clears those two but not
+  // GHSA-4p3w-j4w9-5jqw, which only shows up when 2.29.4 itself is looked up.
+  assert.deepEqual(f.advisories.map((a) => a.ghsa).sort(), ['GHSA-8hfj-j24r-96c4', 'GHSA-wc69-rhjr-hc9g']);
+  assert.deepEqual(f.fix, { target: '2.31.0', crossesMajor: false });
+  assert.deepEqual(calls, [['moment@2.29.1'], ['moment@2.29.4'], ['moment@2.31.0']]);
+  assert.deepEqual(r.warnings, []);
+});
+
+test('candidate targets for many packages are checked in one lookup per round', async () => {
+  const calls = [];
+  await triage(FIXTURE, { advisoryLookup: bulkRegistry(ADVISORIES, calls), versionLookup: async (name) => VERSIONS[name] || [] });
+  assert.equal(calls.length, 2); // the installed versions, then every target at once
+  assert.deepEqual(calls[1].sort(), ['parser@1.0.3', 'test-lib@3.1.0', 'unused-lib@1.0.1']);
+});
+
+test('a target still unconfirmed after the lookup limit is kept, with a warning', async () => {
+  // Every published version has its own advisory, so each check turns up a new one.
+  const versions = ['2.29.1', '2.29.2', '2.29.3', '2.29.4', '2.29.5', '2.29.6', '2.29.7', '2.29.8'];
+  const db = { moment: versions.map((v) => ({ ghsa: `G-${v}`, severity: 'high', vulnerableVersions: `=${v}` })) };
+  const calls = [];
+  const r = await triage(fileURLToPath(new URL('./fixtures/moment', import.meta.url)), {
+    advisoryLookup: bulkRegistry(db, calls),
+    versionLookup: async () => versions,
+  });
+  assert.equal(calls.length, 1 + MAX_TARGET_CHECKS);
+  assert.equal(r.findings[0].fix.target, '2.29.7'); // 2.29.2 to 2.29.6 were checked and ruled out
+  assert.deepEqual(r.warnings, [
+    'moment@2.29.1: upgrade target 2.29.7 was not checked against the registry after 5 lookups; it may still be vulnerable',
+  ]);
+});
+
+test('a failed lookup for a candidate target fails the scan', async () => {
+  let n = 0;
+  await assert.rejects(
+    triage(fileURLToPath(new URL('./fixtures/moment', import.meta.url)), {
+      advisoryLookup: async (installs) => {
+        if (n++) throw new Error('HTTP 503');
+        return bulkRegistry(MOMENT)(installs);
+      },
+      versionLookup: async () => MOMENT_VERSIONS,
+    }),
+    /HTTP 503/,
+  );
 });

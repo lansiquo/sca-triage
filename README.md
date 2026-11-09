@@ -118,9 +118,17 @@ Preview first with `plan` (or `fix --dry-run`); it changes nothing. Then `fix`:
 2. Pins vulnerable direct dependencies to the safe version (`--save-exact`). Transitive ones get npm
    `overrides`, scoped to their parent when copies need different versions.
 3. Installs with `--ignore-scripts`.
-4. Runs `npm test` again and rescans.
+4. Runs `npm test` again and rescans. If the tests also failed in the baseline run, the output
+   says so, since the failure may not be caused by the upgrade.
 5. Writes an evidence folder (`--evidence <dir>`, default `<project>/evidence/<timestamp>`):
    `REPORT.md`, `before.json`, `after.json`, both lockfiles, both test logs and a CycloneDX SBOM.
+
+The target is the smallest published version outside every advisory range, including advisories
+that only affect versions newer than the installed one. The registry reports only advisories that
+affect the versions it is asked about, so each candidate target is looked up too (one batched request
+per round, up to 5 rounds), and the pick is repeated until the target is clean. A target that is
+still unconfirmed after 5 rounds is kept and flagged with a warning. If a lookup fails, the command
+stops with exit code 2.
 
 It prefers a fix on the same release line. A major upgrade is applied only when no same-major fix
 exists, and it is flagged. `--min-priority P1` limits fixes to P1. If there's no `test` script, or
