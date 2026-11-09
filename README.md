@@ -10,66 +10,22 @@ checks them with your project's own tests.
 schedule, and evidence that the fix didn't break anything. Its SAST companion,
 [sast-triage](https://github.com/lansiquo/sast-triage), ranks Semgrep findings P1–P3 the same way.
 
-> [!WARNING]
-> [`lab/vulnerable-app`](lab/vulnerable-app) is **intentionally vulnerable**. It pins known-vulnerable
-> versions of `minimist`, `axios`, `semver` and `tar` so the tool has something real to find and fix.
-> Use it locally only; don't deploy it or copy its versions. Dependabot alerts on this repository are
-> expected. The scanner itself (`bin/`, `src/`) has no dependencies.
+## Example: OWASP NodeGoat
 
-## Try the lab
-
-One command runs the whole lab (Node.js 20 or newer, with access to `registry.npmjs.org`):
-
-```bash
-git clone https://github.com/lansiquo/sca-triage.git
-cd sca-triage
-npm run lab
-```
-
-It runs these steps in order, prints each command before it runs, and stops if any result is not
-the expected one:
-
-```bash
-npm ci --prefix lab/vulnerable-app --ignore-scripts --no-audit --no-fund   # install the vulnerable app
-node bin/sca-triage.js scan lab/vulnerable-app                             # 4 vulnerable, P1 gate fails (expected)
-node bin/sca-triage.js plan lab/vulnerable-app                             # dry run: the 4 upgrades
-cp -r lab/vulnerable-app <run>/app                                         # copy to a new temp folder
-node bin/sca-triage.js fix <run>/app --evidence <run>/evidence             # upgrade, test, rescan
-node bin/sca-triage.js scan <run>/app                                      # 0 vulnerable, gate passes
-cat <run>/evidence/REPORT.md                                               # the saved report
-```
-
-`<run>` is a new temporary folder for each run, so `lab/vulnerable-app` never changes and you can run
-the lab again without cleaning up. The last lines print where the fixed copy and evidence are.
-
-What the first scan finds (one line per finding; counts and versions follow the advisory database):
-
-```text
-intentionally-vulnerable-export-job: 33 packages scanned, 4 vulnerable (P1: 3, P2: 1, P3: 0)
-
-[P1] minimist@1.2.5  CRITICAL   imported by your code (src/export-job.js:7)   fix: 1.2.6
-[P1] axios@1.6.0     HIGH       imported by your code (src/notify.js:7)       fix: 1.20.0
-[P1] semver@7.5.1    HIGH       imported by your code (src/export-job.js:8)   fix: 7.5.2
-[P2] tar@6.1.0       CRITICAL   not imported                                  fix: 7.5.21 (major)
-
-Gate (--fail-on P1): FAIL
-```
-
-`tar` has a critical advisory but ranks P2 because nothing loads it. After `fix`, the copy scans 37
-packages with none vulnerable, the 5 functional tests still pass, and the lab's minimist
-prototype-pollution test (GHSA-xvch-5gv4-984h) goes from failing to passing. The
-[CI lab gate](.github/workflows/ci.yml) checks this on every push to `main` and every pull request.
-
-## On a real project: OWASP NodeGoat
-
-Beyond the lab, I scanned [OWASP NodeGoat](https://github.com/OWASP/NodeGoat) at commit `c5cb68a`,
-a deliberately vulnerable Node.js app with 1,479 locked packages. The scan only reads its lockfile
-and source; nothing from NodeGoat is installed or run. From the folder containing `sca-triage`:
+I scanned [OWASP NodeGoat](https://github.com/OWASP/NodeGoat) at commit `c5cb68a`,
+a deliberately vulnerable Node.js app with 1,479 locked packages (Node.js 20 or newer, with access to
+`registry.npmjs.org`). `scan` and `plan` only read its lockfile and source; `fix` installs its
+dependencies with install scripts disabled, and none of NodeGoat's code runs. From the folder
+containing `sca-triage`:
 
 ```bash
 git clone https://github.com/OWASP/NodeGoat.git
 git -C NodeGoat checkout c5cb68a
-node sca-triage/bin/sca-triage.js scan NodeGoat
+node sca-triage/bin/sca-triage.js scan NodeGoat                    # ranked findings
+node sca-triage/bin/sca-triage.js plan NodeGoat --min-priority P1  # dry run: the P1 upgrades
+cp -r NodeGoat NodeGoat-fixed
+node sca-triage/bin/sca-triage.js fix NodeGoat-fixed --min-priority P1 --no-tests --evidence evidence
+node sca-triage/bin/sca-triage.js scan NodeGoat-fixed              # rescan
 ```
 
 One line per P1 finding (counts and versions follow the advisory database at scan time):
@@ -98,8 +54,15 @@ Gate (--fail-on P1): FAIL
 
 The scan matches 437 advisories across 180 vulnerable packages and narrows "fix now" to 13 P1
 packages the app loads, either directly or through an imported dependency such as `express` or
-`mongodb`. Transitive packages are fixed with npm `overrides`. `swig` has no fixed release, so it
-needs replacing rather than upgrading.
+`mongodb`. `plan` lists 12 upgrades for them: 4 direct dependencies pinned with `npm install`
+(`marked` and `mongodb` are major upgrades) and 8 transitive packages fixed with npm `overrides`.
+`swig` has no fixed release, so it needs replacing rather than upgrading.
+
+`fix` applies the 12 upgrades to the copy. NodeGoat's `npm test` runs no tests (its unit-test folder
+doesn't exist), so the run uses `--no-tests` and the report marks the upgrades unverified. The rescan
+finds 164 vulnerable packages and 3 P1s: `swig`, and older copies of `body-parser` and `debug` that
+`express` and `helmet` still pull in. The [case study](https://dotrobin.dev/sca-triage.html) shows
+the full output of each step.
 
 ## Use it on your project
 
@@ -198,6 +161,8 @@ fails, `package.json`, any workspace manifests it pinned, and `package-lock.json
   vulnerable function runs. Reachability only lowers priority; it never hides a finding.
 - **Tests are the safety net.** An upgrade is only as verified as the project's test suite.
   `fix` runs that suite, so use it on projects whose test scripts you trust.
+- **One pass may not be enough.** Upgrading a shared package can leave older nested copies under
+  other dependencies, as in the NodeGoat example. The rescan lists them.
 - **Results reflect the advisory database at scan time.** Zero findings is not a certification.
 - **Mirrors:** `SCA_TRIAGE_REGISTRY` points at another registry. It must be `https://`
   (`http://` only for this machine) with no credentials in the URL.
@@ -206,4 +171,3 @@ fails, `package.json`, any workspace manifests it pinned, and `package-lock.json
 
 - [SECURITY.md](SECURITY.md): how the tool treats untrusted input, and how to report an issue
 - [Case study](https://dotrobin.dev/sca-triage.html): design and a run on OWASP NodeGoat
-- [Browser demo](https://dotrobin.dev/demos/sca.html): replay of one recorded run

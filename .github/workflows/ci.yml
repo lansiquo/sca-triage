@@ -1,9 +1,4 @@
-# CI for sca-triage.
-#
-# WARNING: the "lab-gate" job installs lab/vulnerable-app, which is INTENTIONALLY
-# VULNERABLE (known-vulnerable dependency versions are pinned on purpose). It is
-# installed with --ignore-scripts, never started as a service, and only scanned,
-# tested and upgraded inside the runner.
+# CI for sca-triage: unit tests on Node 20 and 22.
 
 name: ci
 
@@ -29,53 +24,3 @@ jobs:
           node-version: ${{ matrix.node }}
       - run: npm test
 
-  lab-gate:
-    name: lab gate (fails on vulnerable baseline, passes after remediation)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: 22
-
-      - name: Install the intentionally vulnerable lab app (no install scripts)
-        run: npm ci --prefix lab/vulnerable-app --ignore-scripts --no-audit --no-fund
-
-      - name: Baseline security test must fail (proves the vulnerability is reachable)
-        run: |
-          if npm test --prefix lab/vulnerable-app; then
-            echo "::error::Security test passed on the vulnerable baseline; the lab is broken"
-            exit 1
-          fi
-
-      - name: Gate must FAIL on the vulnerable baseline
-        run: |
-          set +e
-          node bin/sca-triage.js scan lab/vulnerable-app --fail-on P1 --markdown baseline.md
-          code=$?
-          set -e
-          cat baseline.md >> "$GITHUB_STEP_SUMMARY"
-          if [ "$code" -ne 1 ]; then
-            echo "::error::Expected the gate to fail (exit 1) on the vulnerable baseline, got exit $code"
-            exit 1
-          fi
-
-      - name: Remediate a copy, run its tests, rescan
-        run: |
-          cp -r lab/vulnerable-app "$RUNNER_TEMP/remediated"
-          node bin/sca-triage.js fix "$RUNNER_TEMP/remediated" --evidence "$RUNNER_TEMP/evidence"
-          cat "$RUNNER_TEMP/evidence/REPORT.md" >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Gate must PASS after remediation
-        run: node bin/sca-triage.js scan "$RUNNER_TEMP/remediated" --fail-on P1
-
-      - name: One-command lab (npm run lab) must complete
-        run: npm run lab
-
-      - name: Upload remediation evidence
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: remediation-evidence
-          path: ${{ runner.temp }}/evidence
-          if-no-files-found: ignore

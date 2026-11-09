@@ -1,9 +1,5 @@
 # Security
 
-## Intentionally vulnerable code
-
-`lab/vulnerable-app` is **intentionally vulnerable**: it pins known-vulnerable dependencies so `sca-triage` can demonstrate detection, prioritization and remediation. Alerts about that folder are expected and won't be fixed in place. Use it locally only.
-
 ## Untrusted input
 
 `sca-triage` treats the scanned project and registry responses as untrusted:
