@@ -172,4 +172,5 @@ fails, `package.json`, any workspace manifests it pinned, and `package-lock.json
 ## More
 
 - [SECURITY.md](SECURITY.md): how the tool treats untrusted input, and how to report an issue
+- [ARCHITECTURE.md](ARCHITECTURE.md): components, ranking, upgrade planning, trust boundaries and failure handling, with a diagram
 - [Case study](https://dotrobin.dev/sca-triage.html): design and a run on OWASP NodeGoat
