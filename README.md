@@ -12,15 +12,14 @@ schedule, and evidence that the fix didn't break anything. Its SAST companion,
 
 ## Example: OWASP NodeGoat
 
-I scanned [OWASP NodeGoat](https://github.com/OWASP/NodeGoat) at commit `c5cb68a`,
-a deliberately vulnerable Node.js app with 1,479 locked packages (Node.js 20 or newer, with access to
-`registry.npmjs.org`). `scan` and `plan` only read its lockfile and source; `fix` installs its
-dependencies with install scripts disabled, and none of NodeGoat's code runs. From the folder
-containing `sca-triage`:
+I scanned [OWASP NodeGoat](https://github.com/OWASP/NodeGoat), a deliberately vulnerable Node.js app
+with 1,479 locked packages. The results below are from its latest commit, `c5cb68a` (June 2023).
+It needs Node.js 20 or newer and access to `registry.npmjs.org`. `scan` and `plan` only read its
+lockfile and source; `fix` installs its dependencies with install scripts disabled, and none of
+NodeGoat's code runs. From the folder containing `sca-triage`:
 
 ```bash
 git clone https://github.com/OWASP/NodeGoat.git
-git -C NodeGoat checkout c5cb68a
 node sca-triage/bin/sca-triage.js scan NodeGoat                    # ranked findings
 node sca-triage/bin/sca-triage.js plan NodeGoat --min-priority P1  # dry run: the P1 upgrades
 cp -r NodeGoat NodeGoat-fixed
