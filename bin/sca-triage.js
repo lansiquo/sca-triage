@@ -103,7 +103,7 @@ async function main() {
     }
     const evidenceDir = opts.evidence ? resolve(opts.evidence) : join(dir, 'evidence', new Date().toISOString().replace(/[:.]/g, '-'));
     const r = await applyFixes(dir, { minPriority, evidenceDir, runTests: !opts.noTests });
-    process.stdout.write(`Applied ${r.changes.length} change(s):\n${r.changes.map((c) => `  ${plain(c)}`).join('\n')}\n`);
+    process.stdout.write(`Upgraded ${r.plan.actions.length} package(s):\n${r.changes.map((c) => `  ${plain(c)}`).join('\n')}\n`);
     for (const w of new Set([...(r.before.warnings || []), ...(r.after.warnings || [])])) process.stderr.write(`warning: ${plain(w)}\n`);
     process.stdout.write(`${formatTestsLine(r)}\n`);
     process.stdout.write(`After: ${r.after.findings.length} vulnerable packages (P1: ${r.after.summary.P1}, P2: ${r.after.summary.P2}, P3: ${r.after.summary.P3})\n`);
