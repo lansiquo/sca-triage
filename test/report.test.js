@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { formatMarkdown, formatTable, escapeMarkdown, codeSpan } from '../src/report.js';
+import { formatMarkdown, formatTable, formatTestsLine, escapeMarkdown, codeSpan } from '../src/report.js';
 
 const finding = (overrides = {}) => ({
   priority: 'P1',
@@ -56,4 +56,16 @@ test('code spans fall back to escaping when they could break out', () => {
   assert.equal(codeSpan('npm install x@1.0.0'), '`npm install x@1.0.0`');
   assert.equal(codeSpan('a`b'), 'a\\`b');
   assert.equal(escapeMarkdown('<a>&[b]'), '&lt;a&gt;&amp;\\[b\\]');
+});
+
+test('the fix output says when the tests already failed before the upgrade', () => {
+  const pass = { passed: true, code: 0 };
+  const fail = { passed: false, code: 1 };
+  assert.equal(formatTestsLine({ tests: pass, testsBefore: fail }), 'Tests (npm test): passed');
+  assert.equal(formatTestsLine({ tests: fail, testsBefore: pass }), 'Tests (npm test): FAILED');
+  assert.equal(
+    formatTestsLine({ tests: fail, testsBefore: fail }),
+    'Tests (npm test): FAILED (also failed before the upgrade, so this failure may not be caused by it)',
+  );
+  assert.equal(formatTestsLine({ tests: null, testsSkipped: 'disabled with --no-tests' }), 'Tests: not run — changes applied but UNVERIFIED (disabled with --no-tests)');
 });

@@ -6,7 +6,7 @@ import { resolve, join } from 'node:path';
 import { writeFileSync } from 'node:fs';
 import { triage, gateFails } from '../src/triage.js';
 import { planFixes, applyFixes } from '../src/fix.js';
-import { formatTable, formatMarkdown, displayName, plain } from '../src/report.js';
+import { formatTable, formatMarkdown, formatTestsLine, displayName, plain } from '../src/report.js';
 
 const HELP = `Usage:
   sca-triage scan [dir] [--json] [--markdown <file>] [--fail-on P1|P2|P3|none]
@@ -103,9 +103,8 @@ async function main() {
     const evidenceDir = opts.evidence ? resolve(opts.evidence) : join(dir, 'evidence', new Date().toISOString().replace(/[:.]/g, '-'));
     const r = await applyFixes(dir, { minPriority, evidenceDir, runTests: !opts.noTests });
     process.stdout.write(`Applied ${r.changes.length} change(s):\n${r.changes.map((c) => `  ${plain(c)}`).join('\n')}\n`);
-    for (const w of r.after.warnings || []) process.stderr.write(`warning: ${plain(w)}\n`);
-    if (r.tests) process.stdout.write(`Tests (npm test): ${r.tests.passed ? 'passed' : 'FAILED'}\n`);
-    else process.stdout.write(`Tests: not run — changes applied but UNVERIFIED (${r.testsSkipped})\n`);
+    for (const w of new Set([...(r.before.warnings || []), ...(r.after.warnings || [])])) process.stderr.write(`warning: ${plain(w)}\n`);
+    process.stdout.write(`${formatTestsLine(r)}\n`);
     process.stdout.write(`After: ${r.after.findings.length} vulnerable packages (P1: ${r.after.summary.P1}, P2: ${r.after.summary.P2}, P3: ${r.after.summary.P3})\n`);
     process.stdout.write(`Evidence: ${evidenceDir}\n`);
     return r.tests && !r.tests.passed ? 1 : 0;
