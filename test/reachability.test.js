@@ -86,7 +86,7 @@ test('files count by their real location, and files too large to read are report
   mkdirSync(join(dir, 'src'));
   writeFileSync(join(dir, 'src/index.js'), "require('vuln');\n");
   mkdirSync(join(dir, '__tests__'));
-  symlinkSync('../src', join(dir, '__tests__', 'src')); // walked first, but it is src/
+  symlinkSync('../src', join(dir, '__tests__', 'src'), 'dir'); // walked first, but it is src/
   writeFileSync(join(dir, 'big.js'), `require('hidden');\n/*${'x'.repeat(2_000_000)}*/\n`);
   const imports = findImports(dir);
   assert.deepEqual(imports.get('vuln'), { runtime: ['src/index.js:1'], test: [] });

@@ -93,7 +93,7 @@ test('fix refuses a default evidence folder that is a symbolic link', (t) => {
   cpSync(fixture, join(dir, 'app'), { recursive: true });
   rmSync(join(dir, 'app', 'evidence'), { recursive: true, force: true });
   mkdirSync(join(dir, 'elsewhere'));
-  symlinkSync(join(dir, 'elsewhere'), join(dir, 'app', 'evidence'));
+  symlinkSync(join(dir, 'elsewhere'), join(dir, 'app', 'evidence'), 'dir');
   const r = run('fix', join(dir, 'app'), '--no-tests');
   assert.equal(r.status, 2);
   assert.match(r.stderr, /is a symbolic link; pass --evidence/);
