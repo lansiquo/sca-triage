@@ -58,6 +58,11 @@ packages the app loads, either directly or through an imported dependency such a
 `express` requires `body-parser` 1.18.3 exactly, so it also gets an override for the new version.
 `swig` has no fixed release, so it needs replacing rather than upgrading.
 
+The example passes `--min-priority P1`, so `fix` upgrades only the 13 P1 packages: the ones the app
+loads, which are the ones to fix now. Of the other 167 findings, 130 are in development-only
+packages such as build and test tools, 61 are bundled inside other packages, which overrides can't
+change, and 7 have no fixed release. Without `--min-priority`, `fix` works through every priority.
+
 `fix` applies the 12 upgrades to the copy. NodeGoat's `npm test` runs no tests (its unit-test folder
 doesn't exist), so the run uses `--no-tests` and the report marks the upgrades unverified. The rescan
 finds 164 vulnerable packages and 1 P1, `swig`. The [case study](https://dotrobin.dev/sca-triage.html)
