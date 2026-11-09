@@ -104,21 +104,23 @@ cd sca-triage
 npm ci --prefix lab/vulnerable-app --ignore-scripts --no-audit --no-fund
 node bin/sca-triage.js scan lab/vulnerable-app
 node bin/sca-triage.js plan lab/vulnerable-app
-rm -rf /tmp/lab-copy /tmp/lab-evidence
-cp -r lab/vulnerable-app /tmp/lab-copy
-node bin/sca-triage.js fix /tmp/lab-copy --evidence /tmp/lab-evidence
-node bin/sca-triage.js scan /tmp/lab-copy
-cat /tmp/lab-evidence/REPORT.md
+run=$(mktemp -d)
+cp -r lab/vulnerable-app "$run/app"
+node bin/sca-triage.js fix "$run/app" --evidence "$run/evidence"
+node bin/sca-triage.js scan "$run/app"
+cat "$run/evidence/REPORT.md"
 ```
 
 1. `npm ci` installs the intentionally vulnerable app, with install scripts disabled.
 2. The first `scan` finds 4 vulnerable packages and the P1 gate fails (exit code 1, expected).
 3. `plan` shows the upgrades without changing anything.
-4. `fix` applies them to a copy in `/tmp/lab-copy`, runs its tests and saves evidence to `/tmp/lab-evidence`.
+4. `mktemp -d` makes a new, empty temporary folder, and `cp` copies the app into it. `fix` applies the
+   upgrades to that copy, runs its tests and saves evidence next to it.
 5. The second `scan` checks the fixed copy: no known vulnerabilities, and the gate passes.
 6. `cat` prints the saved `REPORT.md`.
 
-`lab/vulnerable-app` itself is never changed, so you can run the lab again.
+`lab/vulnerable-app` itself is never changed, and each run gets its own temporary folder, so you can
+run the lab again without deleting anything.
 
 Lab scan, condensed to one line per finding (counts and versions follow the advisory database):
 
