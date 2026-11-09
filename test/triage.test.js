@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import { loadProject } from '../src/lockfile.js';
-import { findImports, classify, packageNameFromSpecifier } from '../src/reachability.js';
+import { findImports, resolveImports, classify, packageNameFromSpecifier } from '../src/reachability.js';
 import { triage, pickSafeVersion, priorityFor, gateFails, affects, MAX_TARGET_CHECKS, mapLimit } from '../src/triage.js';
 import { planFixes, applyFixes } from '../src/fix.js';
 import { formatMarkdown } from '../src/report.js';
@@ -50,7 +50,7 @@ test('builds the dependency graph from the lockfile', () => {
 
 test('classifies reachability from real import statements', () => {
   const p = loadProject(FIXTURE);
-  const imports = findImports(FIXTURE);
+  const imports = resolveImports(p, findImports(FIXTURE));
   const level = (path) => classify(p.installs.find((i) => i.path === path), imports).level;
   assert.equal(level('node_modules/web-lib'), 'imported');
   assert.equal(level('node_modules/parser'), 'via-imported');
@@ -183,7 +183,7 @@ test('the upgrade target is checked against advisories that only affect newer ve
   // The installed version is hit by two advisories; 2.29.4 clears those two but not
   // GHSA-4p3w-j4w9-5jqw, which only shows up when 2.29.4 itself is looked up.
   assert.deepEqual(f.advisories.map((a) => a.ghsa).sort(), ['GHSA-8hfj-j24r-96c4', 'GHSA-wc69-rhjr-hc9g']);
-  assert.deepEqual(f.fix, { target: '2.31.0', crossesMajor: false });
+  assert.deepEqual(f.fix, { target: '2.31.0', crossesMajor: false, verified: true });
   assert.deepEqual(calls, [['moment@2.29.1'], ['moment@2.29.4'], ['moment@2.31.0']]);
   assert.deepEqual(r.warnings, []);
 });
@@ -195,7 +195,7 @@ test('candidate targets for many packages are checked in one lookup per round', 
   assert.deepEqual(calls[1].sort(), ['parser@1.0.3', 'test-lib@3.1.0', 'unused-lib@1.0.1']);
 });
 
-test('a target still unconfirmed after the lookup limit is kept, with a warning', async () => {
+test('an unconfirmed target is visible with a warning but excluded from automatic fixes', async () => {
   // Every published version has its own advisory, so each check turns up a new one.
   const versions = ['2.29.1', '2.29.2', '2.29.3', '2.29.4', '2.29.5', '2.29.6', '2.29.7', '2.29.8'];
   const db = { moment: versions.map((v) => ({ ghsa: `G-${v}`, severity: 'high', vulnerableVersions: `=${v}` })) };
@@ -205,6 +205,8 @@ test('a target still unconfirmed after the lookup limit is kept, with a warning'
     versionLookup: async () => versions,
   });
   assert.equal(calls.length, 1 + MAX_TARGET_CHECKS);
+  assert.equal(r.findings[0].fix.verified, false);
+  assert.equal(planFixes(r).actions.length, 0);
   assert.equal(r.findings[0].fix.target, '2.29.7'); // 2.29.2 to 2.29.6 were checked and ruled out
   assert.deepEqual(r.warnings, [
     'moment@2.29.1: upgrade target 2.29.7 was not checked against the registry after 5 lookups; it may still be vulnerable',

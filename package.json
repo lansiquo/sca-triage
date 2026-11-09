@@ -8,13 +8,36 @@
   },
   "files": [
     "bin",
-    "src"
+    "src",
+    "SECURITY.md",
+    "ARCHITECTURE.md",
+    "CHANGELOG.md"
   ],
   "engines": {
     "node": ">=20"
   },
   "scripts": {
-    "test": "node --test test/*.test.js"
+    "test": "node scripts/test.mjs",
+    "test:pack": "node scripts/pack-smoke.mjs"
   },
-  "keywords": ["sca", "security", "npm", "vulnerability", "reachability", "supply-chain", "triage", "github-action", "sbom", "cyclonedx"]
+  "keywords": [
+    "sca",
+    "security",
+    "npm",
+    "vulnerability",
+    "reachability",
+    "supply-chain",
+    "triage",
+    "github-action",
+    "sbom",
+    "cyclonedx"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lansiquo/sca-triage.git"
+  },
+  "bugs": {
+    "url": "https://github.com/lansiquo/sca-triage/issues"
+  },
+  "homepage": "https://github.com/lansiquo/sca-triage#readme"
 }

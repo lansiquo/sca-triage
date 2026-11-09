@@ -83,7 +83,7 @@ test('plan rejects fix-only options (usage error, exit 2)', () => {
   for (const extra of [['--apply'], ['--evidence', '/tmp/x'], ['--no-tests']]) {
     const r = run('plan', fixture, ...extra);
     assert.equal(r.status, 2, extra.join(' '));
-    assert.match(r.stderr, /use "sca-triage fix" to apply/);
+    assert.match(r.stderr, /does not support option/);
   }
 });
 
@@ -141,7 +141,7 @@ test('fix with nothing to upgrade changes no files, exits 0 and still writes the
     const evidence = join(dir, 'ev');
     const r = await withRegistry((url) => runAsync(['fix', dir, '--no-tests', '--evidence', evidence], { SCA_TRIAGE_REGISTRY: url }), {});
     assert.equal(r.status, 0, r.stderr);
-    assert.match(r.stdout, /Upgraded 0 package\(s\)/);
+    assert.match(r.stdout, /Verified 0 of 0 upgrade target\(s\)/);
     assert.match(r.stdout, /After: 0 vulnerable packages/);
     assert.equal(readFileSync(join(dir, 'package.json'), 'utf8') + readFileSync(join(dir, 'package-lock.json'), 'utf8'), before);
     assert.ok(existsSync(join(evidence, 'REPORT.md')));

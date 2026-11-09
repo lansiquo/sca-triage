@@ -88,3 +88,10 @@ test('ignores URL-style and subpath-import specifiers', () => {
   assert.equal(packageNameFromSpecifier('@scope'), null);
   assert.equal(packageNameFromSpecifier('@scope/pkg/sub'), '@scope/pkg');
 });
+
+test('template interpolations and escaped specifiers retain nested and subsequent imports', (t) => {
+  const dir = tempProject(t);
+  writeFileSync(join(dir, 'index.js'), "const value = `text ${require('inside')} tail ${`nested ${require('deep')}`} end`; require('after'); require('esc\\u0061ped');");
+  const imports = findImports(dir);
+  for (const name of ['inside', 'deep', 'after', 'escaped']) assert.ok(imports.has(name), name);
+});

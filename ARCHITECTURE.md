@@ -65,12 +65,17 @@ Each copy gets a reachability level: `imported` (runtime code requires the copy 
 
 Reachability only lowers priority; every vulnerable copy is still reported.
 
+Imports are resolved from each source directory to an installed path before traversal. Local
+workspace links participate in that graph. A source import of a hoisted transitive package is
+also a traversal root; another workspace's same-named copy cannot borrow that evidence.
+The JSON inventory includes the installed nodes and dependency paths used to check override scope.
+
 ## Upgrade planning
 
 - **Target.** The smallest published, non-prerelease version above the installed one that no known advisory covers, on the same release line when one exists (same major, or same `0.minor` below 1.0.0). A target on another line is flagged as a major upgrade.
-- **Re-checks.** The registry only returns advisories for the versions it is asked about, so each new candidate target is looked up too: one batched request per round, up to 5 rounds, picking again until no target changes. A target still unconfirmed after 5 rounds is kept with a warning.
-- **Direct dependencies** are pinned with `npm install name@target --save-exact`, grouped into one install per manifest (root or workspace) and dependency type.
-- **Other copies** get npm `overrides`: one global entry when every installed copy is in the plan, wants the same target and none is a direct dependency; otherwise entries scoped to the packages that require each copy. A package whose range excludes a pinned target (for example `express` requiring `body-parser` 1.18.3) gets a scoped override too.
+- **Re-checks.** The registry only returns advisories for the versions it is asked about, so each new candidate target is looked up too: one batched request per round, up to 5 rounds, picking again until no target changes. A target still unconfirmed after 5 rounds is displayed with a warning and excluded from automatic fixes.
+- **Direct dependencies** are pinned with `npm install name@target --save-exact`, grouped into one install per manifest (root or workspace) and dependency type. Optional and peer declarations keep their kinds; multiple declarations are edited in place before install.
+- **Other copies** get npm `overrides`: one global entry when every installed copy is in the plan, wants the same target and none is a direct dependency; otherwise entries scoped to the parent package name and version. Conflicts and unintended rewrites of unrelated copies stop planning. A package whose range excludes a pinned target (for example `express` requiring `body-parser` 1.18.3) gets a scoped override too.
 - **Stale copies.** npm keeps a locked nested copy that an override rejects and lists it as invalid. Before the overrides install, `fix` removes the lock entries of every nested copy an override covers that is not at the override's version, so npm resolves them again.
 - **Bundled copies** ship inside the tarball of the package above them, which npm overrides cannot change. They get no pin or override; `scan` shows "bundled in <package>: upgrade <package>", and `plan` and `fix` list them grouped by that package. A copy bundled by the project itself is fixed normally.
 - **Scope.** All priorities are planned unless `--min-priority` narrows it.
@@ -93,7 +98,7 @@ Reachability only lowers priority; every vulnerable copy is still reported.
 
 - No third-party dependencies; Node.js built-ins only.
 - npm calls go through an argument allowlist, installs use `--ignore-scripts`, and npm's fund, audit and update-notifier messages are turned off.
-- Source scanning: files under 2 MB, `node_modules` and `.git` skipped everywhere and build output folders at the project root, symlinks followed only inside the project, and bounded import patterns so a crafted file cannot cause catastrophic backtracking.
+- Source scanning: files under 2 MB, `node_modules` and `.git` skipped everywhere and build output folders at the project root, symlinks followed only inside the project, and a linear tokenizer with set-based evidence deduplication.
 - Output: untrusted names and paths are escaped in Markdown, and terminal control characters are replaced in console output.
 - Evidence: `REPORT.md`, `before.json` and `after.json`, both lockfiles, both test logs and a CycloneDX SBOM from `npm sbom`.
 
@@ -104,3 +109,11 @@ Reachability only lowers priority; every vulnerable copy is still reported.
 - Upgrading the packages that bundle vulnerable copies; `plan` names them, and the upgrade is manual.
 - Vulnerabilities missing from the GitHub Advisory Database; results reflect the database at scan time, and zero findings is not a certification.
 - Source-code flaws (see [sast-triage](https://github.com/lansiquo/sast-triage)), secrets and infrastructure code.
+
+## Audit hardening
+
+Baseline evidence is persisted before mutation. npm stdout and stderr are captured to separate
+temporary files, avoiding pipe-buffer termination and keeping SBOM JSON valid. Successful installs
+are verified against the resulting lockfile. A post-install verification error preserves the
+changes and writes an explicit incomplete-verification report, logs and recovery snapshots.
+The CLI lets stdout/stderr drain naturally and sanitizes errors as well as normal terminal output.

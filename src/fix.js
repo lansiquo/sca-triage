@@ -2,9 +2,10 @@
 // project's own tests, rescan, and write an evidence folder.
 
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
-import { join, relative, resolve, sep } from 'node:path';
-import { acceptsVersion, releaseLine } from './semver.js';
+import { mkdirSync, readFileSync, writeFileSync, existsSync, mkdtempSync, openSync, closeSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, relative, resolve, sep, dirname } from 'node:path';
+import { acceptsVersion, releaseLine, compare } from './semver.js';
 import { loadProject } from './lockfile.js';
 import { priorityRank, triage } from './triage.js';
 import { formatMarkdown } from './report.js';
@@ -17,13 +18,26 @@ const NPM = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 const SAFE_ARG = /^(?:--[a-z-]+|[A-Za-z0-9@.][A-Za-z0-9@._/:+~^=-]*)$/;
 
 function spawnNpm(cmd, args, cwd) {
-  const res = spawnSync(cmd, args, {
-    cwd,
-    encoding: 'utf8',
-    shell: process.platform === 'win32',
-    env: { ...process.env, npm_config_fund: 'false', npm_config_audit: 'false', npm_config_update_notifier: 'false' },
-  });
-  return { code: res.status ?? 1, output: `${res.stdout || ''}${res.stderr || ''}` };
+  // File-backed capture avoids spawnSync's default 1 MiB pipe buffer terminating
+  // otherwise successful test suites. Keep stderr out of machine-readable stdout.
+  const temp = mkdtempSync(join(tmpdir(), 'sca-triage-npm-'));
+  let out, err;
+  try {
+    out = openSync(join(temp, 'stdout'), 'w');
+    err = openSync(join(temp, 'stderr'), 'w');
+    const res = spawnSync(cmd, args, {
+      cwd, stdio: ['ignore', out, err], shell: process.platform === 'win32',
+      env: { ...process.env, npm_config_fund: 'false', npm_config_audit: 'false', npm_config_update_notifier: 'false' },
+    });
+    const stdout = readFileSync(join(temp, 'stdout'), 'utf8');
+    const stderr = readFileSync(join(temp, 'stderr'), 'utf8');
+    const error = res.error?.message || (res.signal ? `terminated by signal ${res.signal}` : null);
+    return { code: res.status ?? 2, stdout, stderr, output: stdout + stderr, error };
+  } finally {
+    if (out !== undefined) closeSync(out);
+    if (err !== undefined) closeSync(err);
+    rmSync(temp, { recursive: true, force: true });
+  }
 }
 
 // Every npm call goes through the argument check; `exec` is replaceable for tests.
@@ -49,23 +63,26 @@ function installSpec(f, target) {
 //                a global override never pins every copy (and a direct dependency, which
 //                npm refuses) to one version.
 export function planFixes(result, { minPriority = 'P3' } = {}) {
+  if (!['P1', 'P2', 'P3'].includes(minPriority)) throw new Error('--min-priority must be one of P1, P2, P3');
   const threshold = priorityRank(minPriority);
   const selected = result.findings.filter((f) => priorityRank(f.priority) >= threshold);
   // Copies bundled inside another package's tarball: npm overrides can't reach them, so
   // they are listed for a manual upgrade of that package instead of planned.
   const bundled = selected.filter((f) => f.bundledIn);
-  const unfixable = selected.filter((f) => !f.bundledIn && !f.fix.target);
-  const fixable = selected.filter((f) => !f.bundledIn && f.fix.target);
+  const unfixable = selected.filter((f) => !f.bundledIn && (!f.fix.target || f.fix.verified === false));
+  const fixable = selected.filter((f) => !f.bundledIn && f.fix.target && f.fix.verified !== false);
 
   const byName = new Map(); // installed name -> findings
   for (const f of fixable) {
     const name = f.installedAs || f.package;
-    if (!byName.has(name)) byName.set(name, []);
-    byName.get(name).push(f);
+    const key = `${name}\0${f.package}`;
+    if (!byName.has(key)) byName.set(key, []);
+    byName.get(key).push(f);
   }
 
   const actions = [];
-  for (const [name, copies] of byName) {
+  for (const copies of byName.values()) {
+    const name = copies[0].installedAs || copies[0].package;
     const targets = new Map(); // target -> copies
     for (const f of copies) {
       if (!targets.has(f.fix.target)) targets.set(f.fix.target, []);
@@ -90,6 +107,7 @@ export function planFixes(result, { minPriority = 'P3' } = {}) {
         from: [],
         pins: [],
         overrides: [],
+        paths: group.map((f) => f.path),
       };
       for (const f of group) {
         action.from.push(f.version);
@@ -98,23 +116,30 @@ export function planFixes(result, { minPriority = 'P3' } = {}) {
         if (f.direct) {
           action.direct = true;
           for (const d of f.declaredBy || [{ owner: '', kind: f.devOnly ? 'dev' : 'prod' }]) {
-            if (!action.pins.some((p) => p.owner === d.owner)) action.pins.push({ owner: d.owner, dev: d.kind === 'dev' });
+            let pin = action.pins.find((p) => p.owner === d.owner);
+            if (!pin) { pin = { owner: d.owner, kinds: [], dev: true }; action.pins.push(pin); }
+            if (!pin.kinds.includes(d.kind)) pin.kinds.push(d.kind);
+            pin.dev &&= d.kind === 'dev';
           }
           // A package that also uses this copy but whose range excludes the target (express
           // requiring body-parser "1.18.3") would get its own old copy once the pin lands.
-          for (const r of f.requiredSpecs || []) {
+          for (const r of f.requiredEdges || f.requiredSpecs || []) {
             if (r.by === name || acceptsVersion(r.spec, target) !== false) continue;
-            if (!action.overrides.some((o) => o.scope === r.by)) action.overrides.push({ scope: r.by, name, spec });
+            const scope = r.version ? `${r.by}@${r.version}` : r.by;
+            if (!action.overrides.some((o) => o.scope === scope)) action.overrides.push({ scope, name, spec });
           }
         } else if (globalOverride) {
           if (!action.overrides.length) action.overrides.push({ scope: null, name, spec });
         } else {
           // Scope to the packages that require this copy; fall back to the folder it is nested in.
-          let parents = (f.requiredBy || []).filter((p) => p !== name);
+          let parents = f.requiredEdges?.length
+            ? f.requiredEdges.map((p) => `${p.by}@${p.version}`)
+            : (f.requiredBy || []).filter((p) => p !== name);
           if (!parents.length) {
             const i = f.path.lastIndexOf('/node_modules/');
             if (i !== -1) parents = [f.path.slice(0, i).split('node_modules/').pop()];
           }
+          if (!parents.length) throw new Error(`cannot safely scope an override for ${name} at ${f.path}; upgrade its parent manually`);
           for (const scope of parents) {
             if (!action.overrides.some((o) => o.scope === scope)) action.overrides.push({ scope, name, spec });
           }
@@ -123,25 +148,82 @@ export function planFixes(result, { minPriority = 'P3' } = {}) {
       actions.push(action);
     }
   }
+  validateActions(actions);
+  validateCoverage(actions, result.inventory);
   return { actions, unfixable, bundled };
 }
 
 // Merge planned overrides into a package.json "overrides" object, following npm's
 // syntax: { name: spec } globally, or { parent: { name: spec } } scoped to a parent.
 // A parent that already has a plain override keeps it under ".".
+// npm selectors apply throughout a parent's subtree. Check every matching copy,
+// including safe or lower-priority copies, before allowing an override to rewrite it.
+function validateCoverage(actions, inventory) {
+  if (!inventory) return;
+  const nodes = new Map(inventory.map((item) => [item.path, item]));
+  for (const action of actions) for (const override of action.overrides) {
+    const roots = override.scope === null ? inventory : inventory.filter((item) => `${item.name}@${item.version}` === override.scope);
+    const queue = [...roots], seen = new Set();
+    while (queue.length) {
+      const item = queue.pop();
+      if (seen.has(item.path)) continue;
+      seen.add(item.path);
+      if (item.name === action.name && !item.bundledIn) {
+        if (item.realName !== action.package || (!action.paths.includes(item.path)
+          && (releaseLine(item.version) !== releaseLine(action.target) || compare(item.version, action.target) > 0))) {
+          throw new Error(`override ${override.scope || '(global)'} > ${action.name} would rewrite an unrelated copy at ${item.path}; upgrade its parents manually`);
+        }
+      }
+      for (const path of item.dependencyPaths) if (nodes.has(path)) queue.push(nodes.get(path));
+    }
+  }
+}
+
+function validateActions(actions) {
+  const assignments = new Map();
+  const set = (key, value) => {
+    if (assignments.has(key) && assignments.get(key) !== value) throw new Error(`conflicting upgrade targets for ${key}; upgrade the parents manually`);
+    assignments.set(key, value);
+  };
+  for (const a of actions) {
+    for (const pin of a.pins || []) set(`pin ${pin.owner}:${a.name}`, a.spec);
+    for (const o of a.overrides) set(`override ${o.scope || '(global)'}:${o.name}`, o.spec);
+  }
+  for (const a of actions) for (const o of a.overrides) {
+    const global = assignments.get(`override (global):${o.name}`);
+    if (global && global !== o.spec) throw new Error(`conflicting global and scoped overrides for ${o.name}`);
+  }
+}
+
+const object = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+const put = (obj, key, value) => Object.defineProperty(obj, key, { value, writable: true, configurable: true, enumerable: true });
+function setOverride(obj, name, spec) {
+  const previous = Object.hasOwn(obj, name) ? obj[name] : undefined;
+  if (object(previous)) put(previous, '.', spec);
+  else put(obj, name, spec);
+}
+
 export function applyOverrides(existing, actions) {
-  const overrides = existing && typeof existing === 'object' && !Array.isArray(existing) ? existing : {};
+  validateActions(actions);
+  if (existing !== undefined && !object(existing)) throw new Error('package.json overrides must be an object');
+  const overrides = structuredClone(existing || {});
   const changes = [];
   for (const a of actions) {
     for (const o of a.overrides) {
       if (o.scope === null) {
-        overrides[o.name] = o.spec;
+        setOverride(overrides, o.name, o.spec);
         changes.push(`package.json overrides: "${o.name}": "${o.spec}"`);
       } else {
+        const parent = o.scope.slice(0, o.scope.lastIndexOf('@'));
+        // A broader existing selector may take precedence in npm. Do not silently
+        // shadow it or erase its descendants to force the new selector to win.
+        if (parent && Object.hasOwn(overrides, parent) && object(overrides[parent]) && Object.hasOwn(overrides[parent], o.name)) {
+          throw new Error(`existing override ${parent} > ${o.name} overlaps ${o.scope}; reconcile it manually`);
+        }
         const cur = Object.hasOwn(overrides, o.scope) ? overrides[o.scope] : undefined;
-        const scoped = cur && typeof cur === 'object' ? cur : cur === undefined ? {} : { '.': cur };
-        scoped[o.name] = o.spec;
-        overrides[o.scope] = scoped;
+        const scoped = object(cur) ? cur : cur === undefined ? {} : { '.': cur };
+        setOverride(scoped, o.name, o.spec);
+        put(overrides, o.scope, scoped);
         changes.push(`package.json overrides: "${o.scope}" > "${o.name}": "${o.spec}"`);
       }
     }
@@ -149,24 +231,42 @@ export function applyOverrides(existing, actions) {
   return { overrides, changes };
 }
 
-// Group the pins into one `npm install` per manifest and dependency type, so npm resolves
-// the tree once per group instead of once per package.
+const KIND_FIELDS = { prod: 'dependencies', dev: 'devDependencies', optional: 'optionalDependencies', peer: 'peerDependencies' };
+
+// Keep npm's normal save flags for a single declaration. Packages declared in more
+// than one field are edited in place before install so npm cannot migrate their type.
 export function pinCommands(actions) {
-  const groups = new Map(); // "owner\0dev|prod" -> { owner, dev, specs }
+  const groups = new Map();
   for (const a of actions) {
     for (const pin of a.pins) {
-      const key = `${pin.owner}\0${pin.dev ? 'dev' : 'prod'}`;
-      if (!groups.has(key)) groups.set(key, { owner: pin.owner, dev: pin.dev, specs: [] });
+      const kinds = pin.kinds || [pin.dev ? 'dev' : 'prod'];
+      if (kinds.some((k) => !Object.hasOwn(KIND_FIELDS, k))) throw new Error('unknown dependency kind');
+      const key = `${pin.owner}\0${kinds.slice().sort().join(',')}`;
+      if (!groups.has(key)) groups.set(key, { owner: pin.owner, kinds, specs: [], edits: [] });
+      const group = groups.get(key);
       const spec = `${a.name}@${a.spec}`;
-      const g = groups.get(key);
-      if (!g.specs.includes(spec)) g.specs.push(spec);
+      if (!group.specs.includes(spec)) group.specs.push(spec);
+      group.edits.push({ name: a.name, spec: a.spec, kinds });
     }
   }
   return [...groups.values()].map((g) => {
-    const flags = ['--save-exact', '--ignore-scripts', g.dev ? '--save-dev' : '--save-prod'];
-    if (g.owner) flags.push('--workspace', g.owner);
-    return { owner: g.owner, args: ['install', ...g.specs, ...flags] };
+    const args = g.kinds.length > 1 ? ['install', '--ignore-scripts']
+      : ['install', ...g.specs, '--save-exact', '--ignore-scripts', `--save-${g.kinds[0]}`];
+    if (g.owner) args.push('--workspace', g.owner);
+    return { owner: g.owner, args, edits: g.kinds.length > 1 ? g.edits : [] };
   });
+}
+
+function editPins(projectDir, command) {
+  if (!command.edits.length) return;
+  const file = join(projectDir, command.owner, 'package.json');
+  const pkg = JSON.parse(readFileSync(file, 'utf8'));
+  for (const edit of command.edits) for (const kind of edit.kinds) {
+    const field = KIND_FIELDS[kind];
+    if (!Object.hasOwn(pkg[field] || {}, edit.name)) throw new Error(`declaration changed during fix: ${field}.${edit.name}`);
+    put(pkg[field], edit.name, edit.spec);
+  }
+  writeFileSync(file, JSON.stringify(pkg, null, 2) + '\n');
 }
 
 const RESTORE_HINT = 'node_modules may still hold the partial install: run "npm ci" to match the restored lockfile';
@@ -175,7 +275,14 @@ export async function applyFixes(projectDir, { minPriority = 'P3', evidenceDir, 
   const before = await triage(projectDir, lookups);
   const plan = planFixes(before, { minPriority });
   const changes = [];
-  const npm = (args) => run(NPM, args, projectDir, exec);
+  const commandLogs = [];
+  const npm = (args) => {
+    const r = run(NPM, args, projectDir, exec);
+    commandLogs.push(`$ npm ${args.join(' ')}\n${r.output || ''}\nExit: ${r.code}${r.error ? `; execution error: ${r.error}` : ''}\n`);
+    if (evidenceDir) writeFileSync(join(evidenceDir, 'commands.txt'), commandLogs.join('\n'));
+    if (r.error) throw Object.assign(new Error(`could not execute npm ${args[0]}: ${r.error}`), { npmOutput: r.output });
+    return r;
+  };
 
   const pkgPath = join(projectDir, 'package.json');
   const lockPath = join(projectDir, 'package-lock.json');
@@ -183,6 +290,8 @@ export async function applyFixes(projectDir, { minPriority = 'P3', evidenceDir, 
   const lockBefore = readFileSync(lockPath, 'utf8');
   const scripts = JSON.parse(pkgBefore).scripts || {};
   const pins = pinCommands(plan.actions);
+  // Validate override merges before any npm command can mutate the project.
+  applyOverrides(JSON.parse(pkgBefore).overrides, plan.actions);
   // Everything an install step can rewrite, restored if fix fails before the tests:
   // the root manifest, each workspace manifest a pin targets, and the lockfile.
   const snapshots = [['package.json', pkgBefore], ...workspaceManifests(projectDir, pins), ['package-lock.json', lockBefore]];
@@ -194,15 +303,25 @@ export async function applyFixes(projectDir, { minPriority = 'P3', evidenceDir, 
     return { command: 'npm test', code: r.code, passed: r.code === 0, output: r.output };
   };
 
+  if (evidenceDir) {
+    mkdirSync(evidenceDir, { recursive: true });
+    writeFileSync(join(evidenceDir, 'before.json'), JSON.stringify(before, null, 2));
+    writeFileSync(join(evidenceDir, 'package-lock.before.json'), lockBefore);
+    saveSnapshots(evidenceDir, 'before', snapshots);
+    writeFileSync(join(evidenceDir, 'REPORT.md'), formatMarkdown(before, null) + '\n## Verification pending\n\nFix started. Consult commands.txt and the snapshots if the process is interrupted.\n');
+  }
+
   let testsBefore = null;
   let step = null; // the command being run, for the failure report
   try {
     // 0) Baseline test run, so the evidence shows what changed.
     testsBefore = testsEnabled ? runProjectTests() : null;
+    if (evidenceDir && testsBefore) writeFileSync(join(evidenceDir, 'tests.before.txt'), testsBefore.output);
 
     // 1) Direct dependencies: pin the safe versions, one install per manifest and type.
     for (const cmd of pins) {
       step = { command: `npm ${cmd.args.join(' ')}` };
+      editPins(projectDir, cmd);
       const r = npm(cmd.args);
       if (r.code !== 0) throw Object.assign(new Error(`${step.command} failed:\n${r.output}`), { npmOutput: r.output });
       changes.push(step.command);
@@ -230,26 +349,79 @@ export async function applyFixes(projectDir, { minPriority = 'P3', evidenceDir, 
     throw rollback(err, { projectDir, evidenceDir, before, step, changes, snapshots, testsBefore });
   }
 
-  // 3) The project's own tests decide whether the upgrade is safe to keep. A failure here
-  //    keeps the changes (the evidence shows what broke) and the CLI exits 1.
-  const tests = testsEnabled ? runProjectTests() : null;
-
-  // 4) Rescan and write evidence.
-  const after = await triage(projectDir, lookups);
-  if (evidenceDir) {
-    mkdirSync(evidenceDir, { recursive: true });
-    writeFileSync(join(evidenceDir, 'before.json'), JSON.stringify(before, null, 2));
-    writeFileSync(join(evidenceDir, 'after.json'), JSON.stringify(after, null, 2));
-    writeFileSync(join(evidenceDir, 'package-lock.before.json'), lockBefore);
-    writeFileSync(join(evidenceDir, 'package-lock.after.json'), readFileSync(lockPath, 'utf8'));
-    if (testsBefore) writeFileSync(join(evidenceDir, 'tests.before.txt'), testsBefore.output);
-    if (tests) writeFileSync(join(evidenceDir, 'tests.after.txt'), tests.output);
-    const sbom = npm(['sbom', '--sbom-format', 'cyclonedx']);
-    if (sbom.code === 0) writeFileSync(join(evidenceDir, 'sbom.cdx.json'), sbom.output);
-    writeFileSync(join(evidenceDir, 'REPORT.md'), formatMarkdown(before, after, { changes, tests, testsBefore, testsSkipped }));
+  // From this point onward, verification failures preserve applied changes and
+  // always record their state. A registry outage is not a successful rescan.
+  let tests = null, after = null;
+  let verification;
+  try {
+    tests = testsEnabled ? runProjectTests() : null;
+    if (evidenceDir && tests) writeFileSync(join(evidenceDir, 'tests.after.txt'), tests.output);
+    after = await triage(projectDir, lookups);
+    verification = verifyTargets(projectDir, before, plan);
+  } catch (err) {
+    let note = '';
+    if (evidenceDir) {
+      try {
+        saveSnapshots(evidenceDir, 'after', snapshots.map(([file]) => [file, readFileSync(join(projectDir, file), 'utf8')]));
+        writeFileSync(join(evidenceDir, 'package-lock.after.json'), readFileSync(lockPath, 'utf8'));
+        writeFileSync(join(evidenceDir, 'verification-error.txt'), String(err.stack || err));
+        writeFileSync(join(evidenceDir, 'REPORT.md'), formatMarkdown(before, after, { changes, tests, testsBefore, testsSkipped, verificationError: err.message }));
+        note = `\nEvidence: ${evidenceDir}`;
+      } catch (e) { note = `\nCould not finish writing evidence: ${e.message}`; }
+    }
+    throw new Error(`Post-install verification failed: ${err.message}\nApplied changes were preserved; review the before/after snapshots before proceeding.${note}`, { cause: err });
   }
+  const verificationWarnings = verification.unresolved.map((name) => `upgrade target not confirmed for ${name}; inspect the lockfile and install log`);
+  if (evidenceDir) {
+    writeFileSync(join(evidenceDir, 'after.json'), JSON.stringify(after, null, 2));
+    saveSnapshots(evidenceDir, 'after', snapshots.map(([file]) => [file, readFileSync(join(projectDir, file), 'utf8')]));
+    writeFileSync(join(evidenceDir, 'package-lock.after.json'), readFileSync(lockPath, 'utf8'));
+    // SBOM diagnostics are useful evidence, but are never appended to the JSON file.
+    const sbomFile = join(evidenceDir, 'sbom.cdx.json');
+    rmSync(sbomFile, { force: true });
+    try {
+      const sbom = npm(['sbom', '--sbom-format', 'cyclonedx']);
+      writeFileSync(join(evidenceDir, 'sbom.stderr.txt'), sbom.stderr || '');
+      if (sbom.code !== 0) throw new Error(`npm sbom exited ${sbom.code}`);
+      const stdout = sbom.stdout ?? sbom.output;
+      const parsed = JSON.parse(stdout);
+      if (!object(parsed)) throw new Error('npm sbom did not return a JSON object');
+      writeFileSync(sbomFile, stdout);
+    } catch (err) {
+      verificationWarnings.push(`SBOM unavailable: ${err.message}`);
+      writeFileSync(join(evidenceDir, 'sbom-error.txt'), String(err.message));
+    }
+    writeFileSync(join(evidenceDir, 'REPORT.md'), formatMarkdown(before, after, { changes, tests, testsBefore, testsSkipped, verificationWarnings }));
+  }
+  return { before, after, plan, changes, tests, testsBefore, testsSkipped, verification, verificationWarnings,
+    evidenceWritten: Boolean(evidenceDir && existsSync(evidenceDir)) };
+}
 
-  return { before, after, plan, changes, tests, testsBefore, testsSkipped, evidenceWritten: Boolean(evidenceDir && existsSync(evidenceDir)) };
+function saveSnapshots(evidenceDir, stage, snapshots) {
+  for (const [file, text] of snapshots) {
+    const destination = join(evidenceDir, stage, file);
+    mkdirSync(dirname(destination), { recursive: true });
+    writeFileSync(destination, text);
+  }
+}
+
+function verifyTargets(projectDir, before, plan) {
+  const project = loadProject(projectDir);
+  const unresolved = [], confirmed = [];
+  for (const action of plan.actions) {
+    const sources = before.findings.filter((f) => action.paths.includes(f.path));
+    const ok = sources.every((f) => {
+      const origins = f.direct ? f.declaredBy.map((d) => d.owner)
+        : f.requiredEdges?.length ? f.requiredEdges.map((r) => r.path)
+          : [f.path.slice(0, Math.max(0, f.path.lastIndexOf('node_modules/'))).replace(/\/$/, '')];
+      return origins.every((origin) => {
+        const installed = project.resolveDependency(origin, action.name);
+        return installed?.realName === action.package && installed.version === action.target;
+      });
+    });
+    (ok ? confirmed : unresolved).push(`${action.name}@${action.target}`);
+  }
+  return { confirmed, unresolved };
 }
 
 // An install step failed (or something threw) before the tests ran: put package.json and
@@ -325,7 +497,7 @@ function dropStaleCopies(projectDir, lockPath, actions) {
       // Top-level copies are updated by npm itself; the nested ones are what it leaves behind.
       // Bundled copies ship inside their parent's tarball, so neither overrides nor this reach them.
       if (install.name !== a.name || install.version === a.target || install.direct || install.topLevel || install.inBundle) continue;
-      const targeted = a.overrides.some((o) => o.scope === null || install.requiredBy.includes(o.scope)
+      const targeted = a.overrides.some((o) => o.scope === null || install.requiredEdges.some((r) => `${r.by}@${r.version}` === o.scope) || install.requiredBy.includes(o.scope)
         || install.path.includes(`node_modules/${o.scope}/node_modules/`));
       if (targeted && !stale.some((s) => s.path === install.path)) stale.push(install);
     }

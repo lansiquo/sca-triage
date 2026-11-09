@@ -108,6 +108,9 @@ export function normalizeAdvisories(raw) {
       if (!isPlainObject(a) || typeof a.vulnerable_versions !== 'string') {
         throw new Error(`advisory response for "${name}" has an entry without vulnerable_versions`);
       }
+      if (!['info', 'low', 'moderate', 'high', 'critical'].includes(a.severity)) {
+        throw new Error(`advisory response for "${name}" has an invalid or missing severity`);
+      }
     }
     out[name] = list.map((a) => ({
       ghsa: String(a.url || '').split('/').pop() || String(a.id),

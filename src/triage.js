@@ -4,7 +4,7 @@
 
 import { loadProject } from './lockfile.js';
 import { fetchAdvisories, fetchVersions, severityRank } from './advisories.js';
-import { findImports, classify, REACHABILITY_RANK } from './reachability.js';
+import { findImports, resolveImports, classify, REACHABILITY_RANK } from './reachability.js';
 import { satisfies, compare, parse, isPrerelease, sortVersions, releaseLine } from './semver.js';
 
 // satisfies(), but a range or version this tool can't parse counts as a match, with a
@@ -86,7 +86,7 @@ const VERSION_LOOKUP_CONCURRENCY = 8;
 
 export async function triage(projectDir, { advisoryLookup = fetchAdvisories, versionLookup = fetchVersions } = {}) {
   const project = loadProject(projectDir);
-  const imports = findImports(projectDir, { workspaces: project.workspaces });
+  const imports = resolveImports(project, findImports(projectDir, { workspaces: project.workspaces }));
   // Advisories and versions are looked up by the real package name ("lodash" for
   // "foo": "npm:lodash@..."); reachability uses the installed name.
   const lookup = async (installs) => {
@@ -144,6 +144,7 @@ export async function triage(projectDir, { advisoryLookup = fetchAdvisories, ver
       declaredBy: install.declaredBy,
       requiredBy: install.requiredBy,
       requiredSpecs: install.requiredSpecs,
+      requiredEdges: install.requiredEdges,
       bundledIn: install.bundledIn,
       copiesInstalled: copiesByName.get(install.name),
       devOnly: install.dev,
@@ -183,7 +184,8 @@ export async function triage(projectDir, { advisoryLookup = fetchAdvisories, ver
     pick();
   }
   for (const f of findings) {
-    if (f.fix.target && !checked.has(pairKey(f))) {
+    f.fix.verified = Boolean(f.fix.target && checked.has(pairKey(f)));
+    if (f.fix.target && !f.fix.verified) {
       warnings.push(
         `${f.package}@${f.version}: upgrade target ${f.fix.target} was not checked against the registry after ${MAX_TARGET_CHECKS} lookups; it may still be vulnerable`,
       );
@@ -202,6 +204,9 @@ export async function triage(projectDir, { advisoryLookup = fetchAdvisories, ver
     project: project.name,
     scannedAt: new Date().toISOString(),
     packagesScanned: project.installs.length,
+    inventory: [...project.byPath.values()].map(({ name, realName, version, path, dependencyPaths, bundledIn }) => ({
+      name, realName, version, path, dependencyPaths, bundledIn,
+    })),
     summary: {
       P1: findings.filter((f) => f.priority === 'P1').length,
       P2: findings.filter((f) => f.priority === 'P2').length,

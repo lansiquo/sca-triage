@@ -5,7 +5,7 @@
 import { resolve, join } from 'node:path';
 import { writeFileSync } from 'node:fs';
 import { triage, gateFails } from '../src/triage.js';
-import { planFixes, applyFixes } from '../src/fix.js';
+import { planFixes, applyFixes, pinCommands } from '../src/fix.js';
 import { formatTable, formatMarkdown, formatTestsLine, displayName, plain, formatBundled } from '../src/report.js';
 
 const HELP = `Usage:
@@ -43,8 +43,12 @@ function parseArgs(argv) {
     else if (a === '--apply') opts.apply = true; // accepted for compatibility: fix always applies
     else if (a === '--dry-run') opts.dryRun = true;
     else if (a === '--no-tests') opts.noTests = true;
-    else if (['--fail-on', '--min-priority', '--evidence', '--markdown'].includes(a)) opts[a.slice(2)] = argv[++i];
-    else if (a.startsWith('--')) throw new Error(`unknown option ${a}`);
+    else if (['--fail-on', '--min-priority', '--evidence', '--markdown'].includes(a)) {
+      const value = argv[++i];
+      if (!value || value.startsWith('-')) throw new Error(`${a} requires a value`);
+      opts[a.slice(2)] = value;
+    }
+    else if (a.startsWith('-')) throw new Error(`unknown option ${a}`);
     else opts._.push(a);
   }
   return opts;
@@ -63,6 +67,18 @@ async function main() {
     throw new Error(`${command} takes one directory, got ${opts._.length - 1}: ${opts._.slice(1).join(' ')}`);
   }
   const dir = resolve(dirArg || '.');
+  const allowed = {
+    scan: new Set(['json', 'markdown', 'fail-on']),
+    plan: new Set(['min-priority', 'dryRun']),
+    fix: new Set(['min-priority', 'dryRun', 'apply', 'evidence', 'noTests']),
+  };
+  if (!Object.hasOwn(allowed, command)) throw new Error(`unknown command "${command}" (try --help)`);
+  for (const key of Object.keys(opts)) {
+    if (key !== '_' && !allowed[command].has(key)) throw new Error(`${command} does not support option ${key}`);
+  }
+  if (opts['min-priority'] && !['P1', 'P2', 'P3'].includes(opts['min-priority'])) {
+    throw new Error('--min-priority must be one of P1, P2, P3');
+  }
 
   if (command === 'scan') {
     const failOn = opts['fail-on'] || 'P1';
@@ -88,7 +104,10 @@ async function main() {
       if (!plan.actions.length) process.stdout.write('Nothing to upgrade.\n');
       for (const a of plan.actions) {
         const how = [
-          ...a.pins.map((p) => `npm install ${a.name}@${a.spec} --save-exact${p.dev ? ' --save-dev' : ''}${p.owner ? ` --workspace ${p.owner}` : ''}`),
+          ...pinCommands([a]).flatMap((c) => [
+            ...c.edits.map((e) => `pin ${e.name} to ${e.spec} in ${e.kinds.join(', ')} declarations (${c.owner || 'root'})`),
+            `npm ${c.args.join(' ')}`,
+          ]),
           ...a.overrides.map((o) => (o.scope === null ? `overrides: "${o.name}": "${o.spec}"` : `overrides: "${o.scope}" > "${o.name}": "${o.spec}"`)),
         ];
         const label = displayName({ package: a.package, installedAs: a.name });
@@ -96,7 +115,7 @@ async function main() {
           `${plain(`${label}: ${[...new Set(a.from)].join(', ')} -> ${a.target}`)}${a.crossesMajor ? '  (major upgrade: review release notes)' : ''}\n${how.map((h) => `    ${plain(h)}\n`).join('')}`,
         );
       }
-      for (const f of plan.unfixable) process.stdout.write(plain(`${displayName(f)}@${f.version}: no fixed version published yet`) + '\n');
+      for (const f of plan.unfixable) process.stdout.write(plain(`${displayName(f)}@${f.version}: ${f.fix.verified === false && f.fix.target ? 'candidate target is unverified; review manually' : 'no fixed version published yet'}`) + '\n');
       for (const line of formatBundled(plan.bundled)) process.stdout.write(line + '\n');
       for (const w of result.warnings || []) process.stderr.write(`warning: ${plain(w)}\n`);
       process.stdout.write('\nDry run: nothing was changed. Run "sca-triage fix" to apply these upgrades.\n');
@@ -104,12 +123,14 @@ async function main() {
     }
     const evidenceDir = opts.evidence ? resolve(opts.evidence) : join(dir, 'evidence', new Date().toISOString().replace(/[:.]/g, '-'));
     const r = await applyFixes(dir, { minPriority, evidenceDir, runTests: !opts.noTests });
-    process.stdout.write(`Upgraded ${r.plan.actions.length} package(s):\n${r.changes.map((c) => `  ${plain(c)}`).join('\n')}\n`);
+    process.stdout.write(`Verified ${r.verification.confirmed.length} of ${r.plan.actions.length} upgrade target(s):\n${r.changes.map((c) => `  ${plain(c)}`).join('\n')}\n`);
     for (const line of formatBundled(r.plan.bundled)) process.stdout.write(line + '\n');
     for (const w of new Set([...(r.before.warnings || []), ...(r.after.warnings || [])])) process.stderr.write(`warning: ${plain(w)}\n`);
     process.stdout.write(`${formatTestsLine(r)}\n`);
     process.stdout.write(`After: ${r.after.findings.length} vulnerable packages (P1: ${r.after.summary.P1}, P2: ${r.after.summary.P2}, P3: ${r.after.summary.P3})\n`);
     process.stdout.write(`Evidence: ${evidenceDir}\n`);
+    for (const warning of r.verificationWarnings) process.stderr.write(`warning: ${plain(warning)}\n`);
+    if (r.verification.unresolved.length) return 2;
     return r.tests && !r.tests.passed ? 1 : 0;
   }
 
@@ -117,9 +138,9 @@ async function main() {
 }
 
 main().then(
-  (code) => process.exit(code),
+  (code) => { process.exitCode = code; },
   (err) => {
-    process.stderr.write(`sca-triage: ${err.message}\n`);
-    process.exit(2);
+    process.stderr.write(`sca-triage: ${String(err.message).split('\n').map(plain).join('\n')}\n`);
+    process.exitCode = 2;
   },
 );

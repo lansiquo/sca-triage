@@ -7,6 +7,24 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Reject missing option values, invalid priorities, malformed lockfiles and advisories without valid severity.
+- Preserve optional, peer, dual-field and aliased dependency declarations during upgrades.
+- Qualify parent overrides by version, reject conflicting/unsafe scopes and retain nested override rules.
+- Resolve imports to installed copies, including hoisted transitive dependencies and workspace boundaries.
+- Scan long import/export declarations without fixed length limits; keep dense source scanning linear.
+- Drain large CLI output completely and sanitize terminal control characters in errors.
+- Persist recovery evidence before mutation and after failed post-install verification.
+- Capture large npm/test logs without the default pipe buffer limit; separate SBOM JSON from diagnostics.
+- Confirm applied upgrade targets before reporting success; exclude unconfirmed candidates from auto-fixing.
+
+### Release checks
+
+- Add regression tests for all 16 audit findings and real npm integration scenarios.
+- Include linked documentation and repository metadata in the npm package.
+- Test packed consumers and Node 20/22/24 across Linux, macOS and Windows in CI.
+
 ## [1.2.2] - 2026-11-09
 
 ### Fixed

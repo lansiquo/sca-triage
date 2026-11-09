@@ -62,7 +62,7 @@ test('a direct dependency with nested vulnerable copies gets a pin and scoped ov
   });
   assert.equal(plan.actions.length, 1);
   const [a] = plan.actions;
-  assert.deepEqual(a.pins, [{ owner: '', dev: false }]);
+  assert.deepEqual(a.pins, [{ owner: '', kinds: ['prod'], dev: false }]);
   // Never a global "x" override: npm rejects one that conflicts with a direct dependency.
   assert.deepEqual(a.overrides, [{ scope: 'a', name: 'x', spec: '1.0.5' }]);
 });
@@ -81,7 +81,7 @@ test('aliased packages are pinned and overridden with an npm: spec under their i
   assert.equal(a.name, 'foo');
   assert.equal(a.package, 'lodash');
   assert.equal(a.spec, 'npm:lodash@4.17.21');
-  assert.deepEqual(a.pins, [{ owner: '', dev: false }]);
+  assert.deepEqual(a.pins, [{ owner: '', kinds: ['prod'], dev: false }]);
 });
 
 test('workspace dependencies are pinned in their workspace', async () => {
@@ -90,9 +90,9 @@ test('workspace dependencies are pinned in their workspace', async () => {
     versionLookup: async () => ['5.0.1', '6.1.0'],
   });
   const byTarget = Object.fromEntries(planFixes(r).actions.map((a) => [a.target, a]));
-  assert.deepEqual(byTarget['5.0.1'].pins, [{ owner: 'packages/tools', dev: false }]);
+  assert.deepEqual(byTarget['5.0.1'].pins, [{ owner: 'packages/tools', kinds: ['prod'], dev: false }]);
   assert.deepEqual(byTarget['5.0.1'].overrides, []);
-  assert.deepEqual(byTarget['6.1.0'].overrides, [{ scope: 'express', name: 'qs', spec: '6.1.0' }]);
+  assert.deepEqual(byTarget['6.1.0'].overrides, [{ scope: 'express@4.0.0', name: 'qs', spec: '6.1.0' }]);
 });
 
 test('overrides merge into npm syntax without losing existing entries', () => {
@@ -108,7 +108,7 @@ test('overrides merge into npm syntax without losing existing entries', () => {
 test('pins are grouped into one npm install per manifest and dependency type', () => {
   const cmds = pinCommands([
     { name: 'a', spec: '1.0.1', pins: [{ owner: '', dev: false }, { owner: 'packages/web', dev: false }] },
-    { name: 'b', spec: '2.0.1', pins: [{ owner: '', dev: false }] },
+    { name: 'b', spec: '2.0.1', pins: [{ owner: '', kinds: ['prod'], dev: false }] },
     { name: 'c', spec: '3.1.0', pins: [{ owner: '', dev: true }] },
     { name: 'foo', spec: 'npm:lodash@4.17.21', pins: [{ owner: 'packages/web', dev: false }] },
     { name: 'd', spec: '1.0.0', pins: [] },
@@ -172,6 +172,9 @@ test('fix runs one install per manifest group plus one for overrides', async (t)
     'install test-lib@3.1.0 --save-exact --ignore-scripts --save-dev',
     'install --ignore-scripts',
   ]);
+  // The fake never installs target versions: success must not be claimed.
+  assert.equal(r.verification.confirmed.length, 0);
+  assert.equal(r.verification.unresolved.length, r.plan.actions.length);
   // The report lists the commands that ran.
   assert.ok(r.changes.includes('npm install web-lib@2.0.1 unused-lib@1.0.1 --save-exact --ignore-scripts --save-prod'));
   assert.ok(r.changes.includes('npm install test-lib@3.1.0 --save-exact --ignore-scripts --save-dev'));
@@ -274,7 +277,7 @@ test('a pinned direct dependency also gets an override for parents whose range e
     fix: { target: '1.0.5' },
   })] });
   const [a] = plan.actions;
-  assert.deepEqual(a.pins, [{ owner: '', dev: false }]);
+  assert.deepEqual(a.pins, [{ owner: '', kinds: ['prod'], dev: false }]);
   // express pins 1.0.0 exactly; "other" accepts 1.0.5; an unreadable spec is left alone.
   assert.deepEqual(a.overrides, [{ scope: 'express', name: 'x', spec: '1.0.5' }]);
 });
@@ -318,7 +321,7 @@ test('fix drops the lock entries of nested copies an override targets, so npm re
   assert.deepEqual(r.plan.actions.map((a) => a.from), [['1.0.0']]);   // the dev copy is not in the plan
   assert.deepEqual(lockAtInstall, [['', 'node_modules/a', 'node_modules/x', 'node_modules/b', 'node_modules/b/node_modules/a',
     'node_modules/b/node_modules/a/node_modules/c', 'node_modules/b/node_modules/a/node_modules/c/node_modules/x']]);
-  assert.ok(r.changes.includes('package.json overrides: "a" > "x": "1.0.5"'));
+  assert.ok(r.changes.includes('package.json overrides: "a@1.0.0" > "x": "1.0.5"'));
   assert.ok(r.changes.includes('package-lock.json: re-resolve x@1.0.0 at node_modules/a/node_modules/x'));
   assert.ok(r.changes.includes('package-lock.json: re-resolve x@1.0.1 at node_modules/b/node_modules/a/node_modules/x'));
 });

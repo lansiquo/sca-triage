@@ -56,7 +56,7 @@ export function formatBundled(findings) {
 export function upgradeText(f, esc = plain) {
   if (f.bundledIn) return `bundled in ${esc(`${f.bundledIn.name}@${f.bundledIn.version}`)}: upgrade ${esc(f.bundledIn.name)}`;
   if (!f.fix.target) return 'no fixed version published';
-  return `${esc(f.version)} -> ${f.fix.target}${f.fix.crossesMajor ? ' (major upgrade)' : ''}${f.direct ? '' : ' (override)'}`;
+  return `${esc(f.version)} -> ${f.fix.target}${f.fix.crossesMajor ? ' (major upgrade)' : ''}${f.direct ? '' : ' (override)'}${f.fix.verified === false ? ' (unverified: not auto-applied)' : ''}`;
 }
 
 export function formatTable(result) {
@@ -135,6 +135,14 @@ export function formatMarkdown(before, after, extras = {}) {
   }
   if (extras.changes?.length) {
     out.push('', '## Changes applied', '', ...extras.changes.map((c) => `- ${codeSpan(c)}`));
+  }
+  if (extras.verificationError) {
+    out.push('', '## Verification FAILED: applied changes preserved', '',
+      `**No successful verification was completed.** ${escapeMarkdown(extras.verificationError)}`,
+      'Review the before/after manifest and lockfile snapshots and commands.txt before proceeding.');
+  }
+  if (extras.verificationWarnings?.length) {
+    out.push('', '## Verification warnings', '', ...extras.verificationWarnings.map((w) => `- ${escapeMarkdown(w)}`));
   }
   if (extras.tests) {
     const line = (t) => `**${t.passed ? 'passed' : 'FAILED'}** (exit code ${t.code})`;

@@ -73,8 +73,18 @@ npm installs at the time, so a new run can differ slightly. The
 ## Use it on your project
 
 Requires Node.js 20 or newer and access to `registry.npmjs.org`. A scan reads `package.json` and
-`package-lock.json` only, so it doesn't need `node_modules`. Registry timeouts, network errors, 429
+`package-lock.json`, workspace manifests and source files; it does not need `node_modules`. Registry timeouts, network errors, 429
 and 5xx responses are retried (3 attempts, honouring `Retry-After`) before a registry error.
+
+After the package is published to npm:
+
+```bash
+npx sca-triage scan /path/to/project
+npx sca-triage plan /path/to/project
+npx sca-triage fix /path/to/project
+```
+
+To run the current repository checkout before publication:
 
 ```bash
 git clone https://github.com/lansiquo/sca-triage.git
@@ -166,17 +176,26 @@ so you can see what broke, and it exits with code 1.
 
 1. Runs `npm test` for a baseline.
 2. Pins each vulnerable direct dependency to its safe version with
-   `npm install name@version --save-exact`, one install per manifest and dependency type.
+   `npm install name@version --save-exact`, preserving production, development, optional and peer
+   declarations. Multiple declarations are updated in place, retaining peer metadata and aliases.
 3. Fixes vulnerable packages that your dependencies pull in with npm `overrides` in `package.json`,
-   scoped to the packages that need them. A package that requires a version the pin excludes gets
+   scoped to the parent package names and versions that need them. Conflicting or ambiguous
+   scopes stop before installation; existing nested override entries are retained. A package that requires a version the pin excludes gets
    an override too. Old nested copies the overrides cover are removed from `package-lock.json`
    first, so npm installs the new version instead of keeping the old one. Copies bundled inside
    another package can't be changed this way; they are listed under the package to upgrade.
 4. Installs with `--ignore-scripts`, so no install scripts run.
 5. Runs `npm test` again and rescans. If the tests also failed in the baseline run, the output says
    so, since the failure may not be caused by the upgrade.
-6. Writes the evidence folder: `REPORT.md`, `before.json`, `after.json`, both lockfiles, both test
-   logs and a CycloneDX SBOM.
+6. Records the baseline scan and original manifests/lockfile before mutation. The evidence folder
+   contains `REPORT.md`, `before.json`, `after.json` (after a successful rescan), `before/` and `after/`
+   snapshots, both lockfiles, test logs, `commands.txt`, and a CycloneDX SBOM when npm can generate it.
+   SBOM stderr is saved separately; malformed JSON is never saved as an SBOM.
+
+A post-install test execution error or failed rescan exits 2 and preserves applied changes, with
+an explicit incomplete-verification report and recovery snapshots. Normal test failures exit 1.
+The CLI reports how many upgrade targets were actually confirmed in the lockfile; an unresolved
+target exits 2. Test output is captured to temporary files so large logs do not kill passing tests.
 
 ### How upgrades are chosen
 
@@ -184,7 +203,7 @@ The target is the smallest published version outside every advisory range, inclu
 that only affect versions newer than the installed one. The registry reports only advisories that
 affect the versions it is asked about, so each candidate target is looked up too (one batched request
 per round, up to 5 rounds), and the pick is repeated until the target is clean. A target that is
-still unconfirmed after 5 rounds is kept and flagged with a warning. If a lookup fails, the command
+still unconfirmed after 5 rounds is displayed with a warning and excluded from automatic fixes. If a lookup fails, the command
 stops with exit code 2.
 
 It prefers a fix on the same release line. A major upgrade is applied only when no same-major fix
@@ -196,14 +215,17 @@ exists, and it is flagged in the plan and the report.
 |---|---|---|
 | 0 | No finding meets `--fail-on` | Plan shown, or upgrades applied and tests passed (or marked unverified) |
 | 1 | A finding meets `--fail-on` (default `P1`) | Tests failed after the upgrade |
-| 2 | Usage or input error: bad option, more than one directory, missing or v1 lockfile, invalid `SCA_TRIAGE_REGISTRY`, registry error | Same, plus a failed `npm install` |
+| 2 | Usage or input error: bad option, more than one directory, missing or v1 lockfile, invalid `SCA_TRIAGE_REGISTRY`, registry error | Same, plus a failed install, post-install verification error or unconfirmed applied target |
 
 ## Scope and limits
 
 - **npm projects** with `package-lock.json` v2 or v3 (npm 7+). A v1 lockfile is rejected with a
-  message to regenerate it.
+  message to regenerate it. Malformed inventories and missing required dependencies are rejected.
+  Missing optional dependencies and optional peers are allowed. Linked local packages must stay
+  inside the project and have a manifest and lockfile entry.
 - **Import-level reachability.** "Imported" means your code loads the package, not that the
-  vulnerable function runs. Reachability only lowers priority; it never hides a finding.
+  vulnerable function runs. Imports resolve from their source file to the matching installed copy, then follow its
+  dependency graph. Reachability only lowers priority; it never hides a finding.
 - **Tests are the safety net.** An upgrade is only as verified as the project's test suite.
   `fix` runs that suite, so use it on projects whose test scripts you trust.
 - **Bundled dependencies** ship inside another package's tarball, so overrides can't change them.
