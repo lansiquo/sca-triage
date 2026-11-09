@@ -61,7 +61,8 @@ packages the app loads, either directly or through an imported dependency such a
 The example passes `--min-priority P1`, so `fix` upgrades only the 13 P1 packages: the ones the app
 loads, which are the ones to fix now. Of the other 167 findings, 130 are in development-only
 packages such as build and test tools, 61 are bundled inside other packages, which overrides can't
-change, and 7 have no fixed release. Without `--min-priority`, `fix` works through every priority.
+change, and 10 have no fixed release. These groups overlap: a development-only package can also be
+bundled. Without `--min-priority`, `fix` works through every priority.
 
 `fix` applies the 12 upgrades to the copy. NodeGoat's `npm test` runs no tests (its unit-test folder
 doesn't exist), so the run uses `--no-tests` and the report marks the upgrades unverified. The rescan
