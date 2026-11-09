@@ -29,13 +29,48 @@ export function registryUrl(value = process.env.SCA_TRIAGE_REGISTRY) {
   return raw;
 }
 
-async function fetchJson(url, init) {
-  const res = await fetch(url, { ...init, signal: AbortSignal.timeout(30_000) });
-  if (!res.ok) throw new Error(`${init?.method || 'GET'} ${url} -> HTTP ${res.status}`);
-  try {
-    return await res.json();
-  } catch {
-    throw new Error(`${init?.method || 'GET'} ${url} -> response is not JSON`);
+const RETRY_STATUS = new Set([429, 500, 502, 503, 504]);
+const RETRY_DELAYS = [500, 1500]; // before attempts 2 and 3
+const MAX_RETRY_DELAY = 10_000;
+
+// Delay before the next attempt: the server's Retry-After (in seconds) when it sends one,
+// otherwise exponential backoff; capped either way.
+export function retryDelay(attempt, retryAfter) {
+  const seconds = retryAfter == null || retryAfter === '' ? NaN : Number(retryAfter);
+  const ms = Number.isFinite(seconds) && seconds >= 0 ? seconds * 1000 : RETRY_DELAYS[Math.min(attempt, RETRY_DELAYS.length - 1)];
+  return Math.min(ms, MAX_RETRY_DELAY);
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Up to 3 attempts, each with a 30s timeout. Network errors, timeouts, 429 and 5xx gateway
+// errors are retried; other HTTP errors and bad JSON fail at once.
+export async function fetchJson(url, init, { attempts = 3, wait = sleep } = {}) {
+  const what = `${init?.method || 'GET'} ${url}`;
+  for (let attempt = 0; ; attempt += 1) {
+    const last = attempt + 1 >= attempts;
+    let res;
+    try {
+      res = await fetch(url, { ...init, signal: AbortSignal.timeout(30_000) });
+    } catch (err) {
+      if (last) throw new Error(`${what} -> ${err.name === 'TimeoutError' ? 'timed out after 30s' : err.message}${attempts > 1 ? ` (after ${attempts} attempts)` : ''}`);
+      await wait(retryDelay(attempt));
+      continue;
+    }
+    if (!res.ok) {
+      if (!last && RETRY_STATUS.has(res.status)) {
+        await res.body?.cancel().catch(() => {});
+        await wait(retryDelay(attempt, res.headers.get('retry-after')));
+        continue;
+      }
+      const tries = RETRY_STATUS.has(res.status) && attempts > 1 ? ` (after ${attempts} attempts)` : '';
+      throw new Error(`${what} -> HTTP ${res.status}${tries}`);
+    }
+    try {
+      return await res.json();
+    } catch {
+      throw new Error(`${what} -> response is not JSON`);
+    }
   }
 }
 

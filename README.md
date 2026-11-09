@@ -104,7 +104,8 @@ needs replacing rather than upgrading.
 ## Use it on your project
 
 Requires Node.js 20 or newer and access to `registry.npmjs.org`. A scan reads `package.json` and
-`package-lock.json` only, so it doesn't need `node_modules`.
+`package-lock.json` only, so it doesn't need `node_modules`. Registry timeouts, network errors, 429
+and 5xx responses are retried (3 attempts, honouring `Retry-After`) before a registry error.
 
 ```bash
 git clone https://github.com/lansiquo/sca-triage.git
@@ -156,8 +157,9 @@ Svelte and Astro sources, and follows workspaces and aliased packages.
 Preview first with `plan` (or `fix --dry-run`); it changes nothing. Then `fix`:
 
 1. Runs `npm test` for a baseline.
-2. Pins vulnerable direct dependencies to the safe version (`--save-exact`). Transitive ones get npm
-   `overrides`, scoped to their parent when copies need different versions.
+2. Pins vulnerable direct dependencies to the safe version (`--save-exact`), with one `npm install`
+   per manifest and dependency type. Transitive ones get npm `overrides`, scoped to their parent
+   when copies need different versions.
 3. Installs with `--ignore-scripts`.
 4. Runs `npm test` again and rescans. If the tests also failed in the baseline run, the output
    says so, since the failure may not be caused by the upgrade.
@@ -173,7 +175,9 @@ stops with exit code 2.
 
 It prefers a fix on the same release line. A major upgrade is applied only when no same-major fix
 exists, and it is flagged. `--min-priority P1` limits fixes to P1. If there's no `test` script, or
-you pass `--no-tests`, the changes are applied and marked **unverified**.
+you pass `--no-tests`, the changes are applied and marked **unverified**. If an `npm install` step
+fails, `package.json`, any workspace manifests it pinned, and `package-lock.json` are restored, and
+`REPORT.md` records the failed command (`node_modules` is not restored: run `npm ci`). Failing tests after a clean upgrade keep the changes.
 
 > **Changed since v1.0.0:** `fix` on its own now applies the upgrades; it used to be a dry run.
 > Use `plan` to preview. `fix --apply` still works.

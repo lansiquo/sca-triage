@@ -3,7 +3,7 @@
 
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, relative, resolve, sep } from 'node:path';
 import { releaseLine } from './semver.js';
 import { priorityRank, triage } from './triage.js';
 import { formatMarkdown } from './report.js';
@@ -15,9 +15,7 @@ const NPM = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 // can't smuggle a flag or (with Windows' shell) a command into the npm call.
 const SAFE_ARG = /^(?:--[a-z-]+|[A-Za-z0-9@.][A-Za-z0-9@._/:+~^=-]*)$/;
 
-function run(cmd, args, cwd) {
-  const bad = args.find((a) => !SAFE_ARG.test(a));
-  if (bad !== undefined) throw new Error(`refusing to run npm with unexpected argument ${JSON.stringify(bad)}`);
+function spawnNpm(cmd, args, cwd) {
   const res = spawnSync(cmd, args, {
     cwd,
     encoding: 'utf8',
@@ -25,6 +23,13 @@ function run(cmd, args, cwd) {
     env: { ...process.env, npm_config_fund: 'false', npm_config_audit: 'false', npm_config_update_notifier: 'false' },
   });
   return { code: res.status ?? 1, output: `${res.stdout || ''}${res.stderr || ''}` };
+}
+
+// Every npm call goes through the argument check; `exec` is replaceable for tests.
+function run(cmd, args, cwd, exec = spawnNpm) {
+  const bad = args.find((a) => !SAFE_ARG.test(a));
+  if (bad !== undefined) throw new Error(`refusing to run npm with unexpected argument ${JSON.stringify(bad)}`);
+  return exec(cmd, args, cwd);
 }
 
 // The spec npm should install for a copy: "1.2.5", or "npm:lodash@4.17.21" for an alias.
@@ -134,49 +139,83 @@ export function applyOverrides(existing, actions) {
   return { overrides, changes };
 }
 
-export async function applyFixes(projectDir, { minPriority = 'P3', evidenceDir, runTests = true, lookups } = {}) {
+// Group the pins into one `npm install` per manifest and dependency type, so npm resolves
+// the tree once per group instead of once per package.
+export function pinCommands(actions) {
+  const groups = new Map(); // "owner\0dev|prod" -> { owner, dev, specs }
+  for (const a of actions) {
+    for (const pin of a.pins) {
+      const key = `${pin.owner}\0${pin.dev ? 'dev' : 'prod'}`;
+      if (!groups.has(key)) groups.set(key, { owner: pin.owner, dev: pin.dev, specs: [] });
+      const spec = `${a.name}@${a.spec}`;
+      const g = groups.get(key);
+      if (!g.specs.includes(spec)) g.specs.push(spec);
+    }
+  }
+  return [...groups.values()].map((g) => {
+    const flags = ['--save-exact', '--ignore-scripts', g.dev ? '--save-dev' : '--save-prod'];
+    if (g.owner) flags.push('--workspace', g.owner);
+    return { owner: g.owner, args: ['install', ...g.specs, ...flags] };
+  });
+}
+
+const RESTORE_HINT = 'node_modules may still hold the partial install: run "npm ci" to match the restored lockfile';
+
+export async function applyFixes(projectDir, { minPriority = 'P3', evidenceDir, runTests = true, lookups, exec } = {}) {
   const before = await triage(projectDir, lookups);
   const plan = planFixes(before, { minPriority });
   const changes = [];
+  const npm = (args) => run(NPM, args, projectDir, exec);
 
   const pkgPath = join(projectDir, 'package.json');
   const lockPath = join(projectDir, 'package-lock.json');
+  const pkgBefore = readFileSync(pkgPath, 'utf8');
   const lockBefore = readFileSync(lockPath, 'utf8');
-  const scripts = JSON.parse(readFileSync(pkgPath, 'utf8')).scripts || {};
+  const scripts = JSON.parse(pkgBefore).scripts || {};
+  const pins = pinCommands(plan.actions);
+  // Everything an install step can rewrite, restored if fix fails before the tests:
+  // the root manifest, each workspace manifest a pin targets, and the lockfile.
+  const snapshots = [['package.json', pkgBefore], ...workspaceManifests(projectDir, pins), ['package-lock.json', lockBefore]];
   // If the tests can't run, record why, so the output can flag the upgrade as unverified.
   const testsSkipped = !runTests ? 'disabled with --no-tests' : !scripts.test ? 'no "test" script in package.json' : null;
   const testsEnabled = !testsSkipped;
   const runProjectTests = () => {
-    const r = run(NPM, ['test'], projectDir);
+    const r = npm(['test']);
     return { command: 'npm test', code: r.code, passed: r.code === 0, output: r.output };
   };
 
-  // 0) Baseline test run, so the evidence shows what changed.
-  const testsBefore = testsEnabled ? runProjectTests() : null;
+  let testsBefore = null;
+  let step = null; // the command being run, for the failure report
+  try {
+    // 0) Baseline test run, so the evidence shows what changed.
+    testsBefore = testsEnabled ? runProjectTests() : null;
 
-  // 1) Direct dependencies: pin the safe version in each manifest that declares it.
-  for (const a of plan.actions) {
-    for (const pin of a.pins) {
-      const args = ['install', `${a.name}@${a.spec}`, '--save-exact', '--ignore-scripts', pin.dev ? '--save-dev' : '--save-prod'];
-      if (pin.owner) args.push('--workspace', pin.owner);
-      const r = run(NPM, args, projectDir);
-      if (r.code !== 0) throw new Error(`npm ${args.join(' ')} failed:\n${r.output}`);
-      changes.push(`npm ${args.join(' ')}`);
+    // 1) Direct dependencies: pin the safe versions, one install per manifest and type.
+    for (const cmd of pins) {
+      step = { command: `npm ${cmd.args.join(' ')}` };
+      const r = npm(cmd.args);
+      if (r.code !== 0) throw Object.assign(new Error(`${step.command} failed:\n${r.output}`), { npmOutput: r.output });
+      changes.push(step.command);
     }
+
+    // 2) Copies nothing declares directly: npm overrides, then one install to apply them.
+    if (plan.actions.some((a) => a.overrides.length)) {
+      step = { command: 'write package.json overrides' };
+      const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
+      const merged = applyOverrides(pkg.overrides, plan.actions);
+      pkg.overrides = merged.overrides;
+      writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n');
+      changes.push(...merged.changes);
+      step = { command: 'npm install --ignore-scripts' };
+      const r = npm(['install', '--ignore-scripts']);
+      if (r.code !== 0) throw Object.assign(new Error(`npm install (overrides) failed:\n${r.output}`), { npmOutput: r.output });
+    }
+  } catch (err) {
+    throw rollback(err, { projectDir, evidenceDir, before, step, changes, snapshots, testsBefore });
   }
 
-  // 2) Copies nothing declares directly: npm overrides, then one install to apply them.
-  if (plan.actions.some((a) => a.overrides.length)) {
-    const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
-    const merged = applyOverrides(pkg.overrides, plan.actions);
-    pkg.overrides = merged.overrides;
-    changes.push(...merged.changes);
-    writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n');
-    const r = run(NPM, ['install', '--ignore-scripts'], projectDir);
-    if (r.code !== 0) throw new Error(`npm install (overrides) failed:\n${r.output}`);
-  }
-
-  // 3) The project's own tests decide whether the upgrade is safe to keep.
+  // 3) The project's own tests decide whether the upgrade is safe to keep. A failure here
+  //    keeps the changes (the evidence shows what broke) and the CLI exits 1.
   const tests = testsEnabled ? runProjectTests() : null;
 
   // 4) Rescan and write evidence.
@@ -189,10 +228,70 @@ export async function applyFixes(projectDir, { minPriority = 'P3', evidenceDir, 
     writeFileSync(join(evidenceDir, 'package-lock.after.json'), readFileSync(lockPath, 'utf8'));
     if (testsBefore) writeFileSync(join(evidenceDir, 'tests.before.txt'), testsBefore.output);
     if (tests) writeFileSync(join(evidenceDir, 'tests.after.txt'), tests.output);
-    const sbom = run(NPM, ['sbom', '--sbom-format', 'cyclonedx'], projectDir);
+    const sbom = npm(['sbom', '--sbom-format', 'cyclonedx']);
     if (sbom.code === 0) writeFileSync(join(evidenceDir, 'sbom.cdx.json'), sbom.output);
     writeFileSync(join(evidenceDir, 'REPORT.md'), formatMarkdown(before, after, { changes, tests, testsBefore, testsSkipped }));
   }
 
   return { before, after, plan, changes, tests, testsBefore, testsSkipped, evidenceWritten: Boolean(evidenceDir && existsSync(evidenceDir)) };
+}
+
+// An install step failed (or something threw) before the tests ran: put package.json and
+// package-lock.json back, record the failure in the evidence folder, and return the error
+// to throw, with a note on what was restored.
+function rollback(err, { projectDir, evidenceDir, before, step, changes, snapshots, testsBefore }) {
+  const restoreErrors = [];
+  for (const [file, text] of snapshots) {
+    try {
+      writeFileSync(join(projectDir, file), text);
+    } catch (e) {
+      restoreErrors.push(`${file}: ${e.message}`);
+    }
+  }
+  const restored = !restoreErrors.length;
+  const failure = {
+    command: step?.command || null,
+    message: err.npmOutput !== undefined ? `${step.command} exited with an error` : err.message,
+    restored,
+    files: snapshots.map(([file]) => file),
+    restoreErrors,
+    attempted: changes.slice(),
+  };
+  let evidenceNote = '';
+  if (evidenceDir) {
+    try {
+      mkdirSync(evidenceDir, { recursive: true });
+      writeFileSync(join(evidenceDir, 'before.json'), JSON.stringify(before, null, 2));
+      if (testsBefore) writeFileSync(join(evidenceDir, 'tests.before.txt'), testsBefore.output);
+      if (err.npmOutput !== undefined) writeFileSync(join(evidenceDir, 'install-failure.txt'), err.npmOutput);
+      writeFileSync(join(evidenceDir, 'REPORT.md'), formatMarkdown(before, null, { failure, logFile: err.npmOutput !== undefined ? 'install-failure.txt' : null }));
+      evidenceNote = `\nFailure report: ${join(evidenceDir, 'REPORT.md')}`;
+    } catch (e) {
+      evidenceNote = `\nCould not write the failure report: ${e.message}`;
+    }
+  }
+  const status = restored
+    ? `${listFiles(failure.files)} were restored to their original contents; ${RESTORE_HINT}.`
+    : `could NOT restore ${restoreErrors.join('; ')}`;
+  const out = new Error(`${err.message.trimEnd()}\nFix rolled back: ${status}${evidenceNote}`);
+  out.cause = err;
+  out.failure = failure;
+  return out;
+}
+
+// Workspace manifests that a pin group installs into, as [relative path, original text].
+// Only files inside the project are read; npm itself rejects unknown workspaces.
+function workspaceManifests(projectDir, pins) {
+  const root = resolve(projectDir);
+  const out = [];
+  for (const owner of new Set(pins.map((p) => p.owner).filter(Boolean))) {
+    const file = resolve(root, owner, 'package.json');
+    if (!file.startsWith(root + sep) || !existsSync(file)) continue;
+    out.push([relative(root, file).split(sep).join('/'), readFileSync(file, 'utf8')]);
+  }
+  return out;
+}
+
+export function listFiles(files) {
+  return files.length < 2 ? files.join('') : `${files.slice(0, -1).join(', ')} and ${files[files.length - 1]}`;
 }

@@ -103,6 +103,19 @@ export function formatMarkdown(before, after, extras = {}) {
   ];
   const warnings = [...new Set([...(before.warnings || []), ...(after?.warnings || [])])];
   if (warnings.length) out.push('', '## Warnings', '', ...warnings.map((w) => `- ${escapeMarkdown(w)}`));
+  if (extras.failure) {
+    const f = extras.failure;
+    out.push('', '## Fix FAILED: changes rolled back', '');
+    if (f.command) out.push(`Failed step: ${codeSpan(f.command)}`, '');
+    out.push(`Error: ${escapeMarkdown(f.message)}${extras.logFile ? ` (npm output: \`${extras.logFile}\`)` : ''}`, '');
+    out.push(
+      f.restored
+        ? `${(f.files || ['package.json', 'package-lock.json']).map((file) => codeSpan(file)).join(', ').replace(/, ([^,]*)$/, ' and $1')} were **restored** to their original contents.`
+        : `**Restore failed**: ${escapeMarkdown(f.restoreErrors.join('; '))}`,
+    );
+    out.push(`\`node_modules\` was not restored and may not match the lockfile: run \`npm ci\` before using the project.`);
+    if (f.attempted?.length) out.push('', 'Rolled back:', '', ...f.attempted.map((c) => `- ${codeSpan(c)}`));
+  }
   if (extras.changes?.length) {
     out.push('', '## Changes applied', '', ...extras.changes.map((c) => `- ${codeSpan(c)}`));
   }

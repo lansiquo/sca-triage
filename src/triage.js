@@ -62,6 +62,28 @@ function advisoryKey(a) {
   return `${a.ghsa}\u0000${a.vulnerableVersions}`;
 }
 
+// Run fn over items with at most `limit` calls in flight. Results keep the input order.
+export async function mapLimit(items, limit, fn) {
+  const results = new Array(items.length);
+  let next = 0;
+  let failed = false;
+  const worker = async () => {
+    while (!failed && next < items.length) {
+      const i = next++;
+      try {
+        results[i] = await fn(items[i], i);
+      } catch (err) {
+        failed = true; // stop starting new calls; Promise.all reports the first error
+        throw err;
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
+
+const VERSION_LOOKUP_CONCURRENCY = 8;
+
 export async function triage(projectDir, { advisoryLookup = fetchAdvisories, versionLookup = fetchVersions } = {}) {
   const project = loadProject(projectDir);
   const imports = findImports(projectDir, { workspaces: project.workspaces });
@@ -96,16 +118,22 @@ export async function triage(projectDir, { advisoryLookup = fetchAdvisories, ver
 
   const warnings = [];
   const findings = [];
-  const versionCache = new Map();
+  // First pass: which installs an advisory affects. Then look up published versions for
+  // those packages (each name once, a few at a time) before building the findings.
+  const vulnerable = [];
   for (const install of project.installs) {
     const all = advisoriesFor(install.realName);
     addKnown(install.realName, all);
     const affecting = all.filter((a) => affects(install.version, a.vulnerableVersions, warnings, `${a.ghsa} (${install.realName}@${install.version})`));
-    if (!affecting.length) continue;
+    if (affecting.length) vulnerable.push({ install, all, affecting });
+  }
+  const names = [...new Set(vulnerable.map((v) => v.install.realName))];
+  const versionLists = await mapLimit(names, VERSION_LOOKUP_CONCURRENCY, (name) => versionLookup(name));
+  const versionCache = new Map(names.map((name, i) => [name, versionLists[i]]));
 
+  for (const { install, affecting } of vulnerable) {
     const reach = classify(install, imports);
     const maxSeverity = affecting.reduce((s, a) => (severityRank(a.severity) > severityRank(s) ? a.severity : s), 'info');
-    if (!versionCache.has(install.realName)) versionCache.set(install.realName, await versionLookup(install.realName));
 
     findings.push({
       package: install.realName,

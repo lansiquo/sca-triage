@@ -21,7 +21,8 @@ scan   Find known vulnerabilities in the dependency tree locked in
 plan   Dry run: show the smallest safe upgrade for each finding (all
        priorities unless --min-priority is set). Changes nothing.
 fix    Apply those upgrades, run "npm test", rescan, and write an evidence
-       folder. Exit code 1 when the tests fail after the upgrade.
+       folder. Exit code 1 when the tests fail after the upgrade. If an install
+       fails, the manifests and package-lock.json are restored (exit code 2).
        "fix --dry-run" is the same as "plan".
 
 Priorities:

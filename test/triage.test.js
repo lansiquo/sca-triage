@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import { loadProject } from '../src/lockfile.js';
 import { findImports, classify, packageNameFromSpecifier } from '../src/reachability.js';
-import { triage, pickSafeVersion, priorityFor, gateFails, affects, MAX_TARGET_CHECKS } from '../src/triage.js';
+import { triage, pickSafeVersion, priorityFor, gateFails, affects, MAX_TARGET_CHECKS, mapLimit } from '../src/triage.js';
 import { planFixes, applyFixes } from '../src/fix.js';
 import { formatMarkdown } from '../src/report.js';
 
@@ -223,4 +223,45 @@ test('a failed lookup for a candidate target fails the scan', async () => {
     }),
     /HTTP 503/,
   );
+});
+
+test('mapLimit keeps input order and never runs more than the limit at once', async () => {
+  let active = 0;
+  let peak = 0;
+  const items = Array.from({ length: 20 }, (_, i) => i);
+  const out = await mapLimit(items, 8, async (n) => {
+    active += 1;
+    peak = Math.max(peak, active);
+    await new Promise((r) => setTimeout(r, (20 - n) % 5));
+    active -= 1;
+    return n * 2;
+  });
+  assert.deepEqual(out, items.map((n) => n * 2));
+  assert.equal(peak, 8);
+  assert.deepEqual(await mapLimit([], 8, async () => 1), []);
+  await assert.rejects(mapLimit([1, 2, 3], 2, async (n) => { if (n === 2) throw new Error('boom'); return n; }), /boom/);
+});
+
+test('versions are looked up once per vulnerable package, concurrently, with the same result', async () => {
+  const calls = [];
+  let active = 0;
+  let peak = 0;
+  const concurrent = {
+    advisoryLookup: lookups.advisoryLookup,
+    versionLookup: async (name) => {
+      calls.push(name);
+      active += 1;
+      peak = Math.max(peak, active);
+      await new Promise((r) => setTimeout(r, 5));
+      active -= 1;
+      return VERSIONS[name] || [];
+    },
+  };
+  const parallel = await triage(FIXTURE, concurrent);
+  const serial = await triage(FIXTURE, lookups);
+  assert.deepEqual(calls.sort(), [...new Set(calls)].sort(), 'each name once');
+  assert.deepEqual(calls.sort(), [...new Set(parallel.findings.map((f) => f.package))].sort(), 'only vulnerable packages');
+  assert.ok(peak > 1, 'lookups overlap');
+  const strip = (r) => ({ ...r, scannedAt: null });
+  assert.deepEqual(strip(parallel), strip(serial));
 });
