@@ -56,13 +56,13 @@ The scan matches 437 advisories across 180 vulnerable packages and narrows "fix 
 packages the app loads, either directly or through an imported dependency such as `express` or
 `mongodb`. `plan` lists 12 upgrades for them: 4 direct dependencies pinned with `npm install`
 (`marked` and `mongodb` are major upgrades) and 8 transitive packages fixed with npm `overrides`.
+`express` requires `body-parser` 1.18.3 exactly, so it also gets an override for the new version.
 `swig` has no fixed release, so it needs replacing rather than upgrading.
 
 `fix` applies the 12 upgrades to the copy. NodeGoat's `npm test` runs no tests (its unit-test folder
 doesn't exist), so the run uses `--no-tests` and the report marks the upgrades unverified. The rescan
-finds 164 vulnerable packages and 3 P1s: `swig`, and older copies of `body-parser` and `debug` that
-`express` and `helmet` still pull in. The [case study](https://dotrobin.dev/sca-triage.html) shows
-the full output of each step.
+finds 164 vulnerable packages and 1 P1, `swig`. The [case study](https://dotrobin.dev/sca-triage.html)
+shows the full output of each step.
 
 ## Use it on your project
 
@@ -122,7 +122,9 @@ Preview first with `plan` (or `fix --dry-run`); it changes nothing. Then `fix`:
 1. Runs `npm test` for a baseline.
 2. Pins vulnerable direct dependencies to the safe version (`--save-exact`), with one `npm install`
    per manifest and dependency type. Transitive ones get npm `overrides`, scoped to their parent
-   when copies need different versions.
+   when copies need different versions. A package that requires a version the pin excludes gets a
+   scoped override too. Before installing the overrides, nested copies they cover are removed from
+   `package-lock.json` so npm resolves them again; otherwise npm keeps them as "invalid".
 3. Installs with `--ignore-scripts`.
 4. Runs `npm test` again and rescans. If the tests also failed in the baseline run, the output
    says so, since the failure may not be caused by the upgrade.
@@ -161,8 +163,8 @@ fails, `package.json`, any workspace manifests it pinned, and `package-lock.json
   vulnerable function runs. Reachability only lowers priority; it never hides a finding.
 - **Tests are the safety net.** An upgrade is only as verified as the project's test suite.
   `fix` runs that suite, so use it on projects whose test scripts you trust.
-- **One pass may not be enough.** Upgrading a shared package can leave older nested copies under
-  other dependencies, as in the NodeGoat example. The rescan lists them.
+- **Bundled dependencies** ship inside their parent package, so overrides can't change them. They
+  stay in the rescan.
 - **Results reflect the advisory database at scan time.** Zero findings is not a certification.
 - **Mirrors:** `SCA_TRIAGE_REGISTRY` points at another registry. It must be `https://`
   (`http://` only for this machine) with no credentials in the URL.

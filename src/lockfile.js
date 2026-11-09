@@ -92,8 +92,11 @@ export function loadProject(dir) {
       owner: ownerOf(path),
       dev: Boolean(entry.dev),
       optional: Boolean(entry.optional),
+      inBundle: Boolean(entry.inBundle),
       dependsOn: [...new Set(DEP_FIELDS.flatMap((f) => ownKeys(entry[f])))],
+      requires: Object.fromEntries(DEP_FIELDS.slice().reverse().flatMap((f) => ownKeys(entry[f]).map((n) => [n, String(entry[f][n])]))),
       requiredBy: [],
+      requiredSpecs: [],
       declaredBy: [],
     };
     item.aliased = item.realName !== item.name;
@@ -119,7 +122,10 @@ export function loadProject(dir) {
   for (const item of installs) {
     for (const d of item.dependsOn) {
       const next = resolve(item.path, d);
-      if (next && next !== item && !next.requiredBy.includes(item.name)) next.requiredBy.push(item.name);
+      if (next && next !== item && !next.requiredBy.includes(item.name)) {
+        next.requiredBy.push(item.name);
+        next.requiredSpecs.push({ by: item.name, spec: item.requires[d] });
+      }
     }
   }
 

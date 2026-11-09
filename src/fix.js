@@ -4,7 +4,8 @@
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join, relative, resolve, sep } from 'node:path';
-import { releaseLine } from './semver.js';
+import { acceptsVersion, releaseLine } from './semver.js';
+import { loadProject } from './lockfile.js';
 import { priorityRank, triage } from './triage.js';
 import { formatMarkdown } from './report.js';
 
@@ -95,6 +96,12 @@ export function planFixes(result, { minPriority = 'P3' } = {}) {
           action.direct = true;
           for (const d of f.declaredBy || [{ owner: '', kind: f.devOnly ? 'dev' : 'prod' }]) {
             if (!action.pins.some((p) => p.owner === d.owner)) action.pins.push({ owner: d.owner, dev: d.kind === 'dev' });
+          }
+          // A package that also uses this copy but whose range excludes the target (express
+          // requiring body-parser "1.18.3") would get its own old copy once the pin lands.
+          for (const r of f.requiredSpecs || []) {
+            if (r.by === name || acceptsVersion(r.spec, target) !== false) continue;
+            if (!action.overrides.some((o) => o.scope === r.by)) action.overrides.push({ scope: r.by, name, spec });
           }
         } else if (globalOverride) {
           if (!action.overrides.length) action.overrides.push({ scope: null, name, spec });
@@ -206,6 +213,12 @@ export async function applyFixes(projectDir, { minPriority = 'P3', evidenceDir, 
       pkg.overrides = merged.overrides;
       writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n');
       changes.push(...merged.changes);
+      // npm keeps a locked copy that an override now rejects (it lists it as "invalid"), so
+      // remove those lockfile entries and let the install resolve them under the overrides.
+      step = { command: 'update package-lock.json' };
+      for (const c of dropStaleCopies(projectDir, lockPath, plan.actions)) {
+        changes.push(`package-lock.json: re-resolve ${c.name}@${c.version} at ${c.path}`);
+      }
       step = { command: 'npm install --ignore-scripts' };
       const r = npm(['install', '--ignore-scripts']);
       if (r.code !== 0) throw Object.assign(new Error(`npm install (overrides) failed:\n${r.output}`), { npmOutput: r.output });
@@ -294,4 +307,31 @@ function workspaceManifests(projectDir, pins) {
 
 export function listFiles(files) {
   return files.length < 2 ? files.join('') : `${files.slice(0, -1).join(', ')} and ${files[files.length - 1]}`;
+}
+
+// Lockfile entries for nested copies that an override covers but that are not at the
+// override's version (npm lists them as "invalid" and keeps them). Removing them, with
+// anything nested under them, makes npm resolve them again, so the lockfile matches the
+// overrides. That includes lower-priority copies the override also covers.
+function dropStaleCopies(projectDir, lockPath, actions) {
+  const { installs } = loadProject(projectDir);
+  const stale = [];
+  for (const a of actions) {
+    if (!a.overrides.length) continue;
+    for (const install of installs) {
+      // Top-level copies are updated by npm itself; the nested ones are what it leaves behind.
+      // Bundled copies ship inside their parent's tarball, so neither overrides nor this reach them.
+      if (install.name !== a.name || install.version === a.target || install.direct || install.topLevel || install.inBundle) continue;
+      const targeted = a.overrides.some((o) => o.scope === null || install.requiredBy.includes(o.scope)
+        || install.path.includes(`node_modules/${o.scope}/node_modules/`));
+      if (targeted && !stale.some((s) => s.path === install.path)) stale.push(install);
+    }
+  }
+  if (!stale.length) return [];
+  const lock = JSON.parse(readFileSync(lockPath, 'utf8'));
+  for (const key of Object.keys(lock.packages)) {
+    if (stale.some((s) => key === s.path || key.startsWith(`${s.path}/node_modules/`))) delete lock.packages[key];
+  }
+  writeFileSync(lockPath, JSON.stringify(lock, null, 2) + '\n');
+  return stale.sort((x, y) => x.path.localeCompare(y.path));
 }

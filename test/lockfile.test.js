@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { loadProject } from '../src/lockfile.js';
 import { triage } from '../src/triage.js';
 import { normalizeAdvisories } from '../src/advisories.js';
@@ -65,4 +68,23 @@ test('package names that are Object.prototype properties do not break the scan',
   assert.equal(r.packagesScanned, 3);
   const withHit = await triage(fixture('peers'), lookups(normalizeAdvisories({ constructor: [{ vulnerable_versions: '<2.0.0', severity: 'low', title: 't', url: 'u/GHSA-c' }] }), { constructor: ['2.0.0'] }));
   assert.deepEqual(summarize(withHit), ['P3 constructor=constructor@1.0.0 not-imported']);
+});
+
+test('each copy records the spec every package that requires it asks for', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sca-triage-specs-'));
+  try {
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'app', dependencies: { a: '1.0.0', b: '^1.0.0' } }));
+    writeFileSync(join(dir, 'package-lock.json'), JSON.stringify({ lockfileVersion: 3, packages: {
+      '': { name: 'app', dependencies: { a: '1.0.0', b: '^1.0.0' } },
+      'node_modules/a': { version: '1.0.0', dependencies: { b: '1.0.0' }, peerDependencies: { c: '^2.0.0' } },
+      'node_modules/b': { version: '1.0.0' },
+      'node_modules/c': { version: '2.1.0' },
+    } }));
+    const b = loadProject(dir).installs.find((i) => i.path === 'node_modules/b');
+    assert.deepEqual(b.requiredSpecs, [{ by: 'a', spec: '1.0.0' }]);
+    const c = loadProject(dir).installs.find((i) => i.path === 'node_modules/c');
+    assert.deepEqual(c.requiredSpecs, [{ by: 'a', spec: '^2.0.0' }]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

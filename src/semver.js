@@ -93,3 +93,51 @@ export function releaseLine(version) {
   if (p.minor > 0) return `0.${p.minor}`;
   return `0.0.${p.patch}`;
 }
+
+// Whether an npm dependency spec (as written in a package's "dependencies") accepts `version`.
+// Handles exact versions, comparators, ^, ~, x-ranges, hyphen ranges and ||. Returns null for
+// anything else (tags, URLs, git or npm: aliases), so callers can treat it as unknown.
+export function acceptsVersion(spec, version) {
+  const s = String(spec ?? '').trim();
+  if (s === '' || s === '*' || s === 'x' || s === 'latest') return s === 'latest' ? null : true;
+  if (/[^0-9A-Za-z.<>=~^*|\s-]/.test(s) || /^[a-z]/i.test(s.replace(/^v/, ''))) return null;
+  try {
+    return s.split('||').some((set) => {
+      const t = set.trim();
+      const hyphen = t.match(/^(\S+)\s+-\s+(\S+)$/);
+      if (hyphen) return expand(`>=${hyphen[1]}`).every((c) => matchesComparator(version, c)) && expand(`<=${hyphen[2]}`).every((c) => matchesComparator(version, c));
+      const parts = t.replace(/(<=|>=|<|>|=|~|\^)\s+/g, '$1').split(/\s+/).filter(Boolean);
+      return parts.every((p) => expand(p).every((c) => matchesComparator(version, c)));
+    });
+  } catch {
+    return null;
+  }
+}
+
+// One spec token -> plain comparators ("^1.2.3" -> [">=1.2.3", "<2.0.0"]).
+function expand(token) {
+  const m = /^(<=|>=|<|>|=|~|\^)?v?(\d+|[xX*])(?:\.(\d+|[xX*]))?(?:\.(\d+|[xX*]))?(-[0-9A-Za-z.-]+)?$/.exec(token);
+  if (!m) throw new Error(`unsupported range: "${token}"`);
+  const [, op = '', a, b, c, pre = ''] = m;
+  const wild = (v) => v === undefined || /^[xX*]$/.test(v);
+  const [M, m1, p] = [a, b, c].map((v) => (wild(v) ? null : Number(v)));
+  if (M === null) return op === '<' || op === '>' ? ['<0.0.0'] : [];
+  if (op === '^') {
+    const lo = `>=${M}.${m1 ?? 0}.${p ?? 0}${pre}`;
+    if (M > 0 || m1 === null) return [lo, `<${M + 1}.0.0`];
+    if (m1 > 0 || p === null) return [lo, `<0.${m1 + 1}.0`];
+    return [lo, `<0.0.${p + 1}`];
+  }
+  if (op === '~') return m1 === null ? [`>=${M}.0.0`, `<${M + 1}.0.0`] : [`>=${M}.${m1}.${p ?? 0}${pre}`, `<${M}.${m1 + 1}.0`];
+  if (m1 === null || p === null) {
+    // x-range or partial version: "1", "1.2", "1.x"
+    const lo = `${M}.${m1 ?? 0}.0`;
+    const hi = m1 === null ? `${M + 1}.0.0` : `${M}.${m1 + 1}.0`;
+    if (op === '' || op === '=') return [`>=${lo}`, `<${hi}`];
+    if (op === '>=' ) return [`>=${lo}`];
+    if (op === '<') return [`<${lo}`];
+    if (op === '>') return [`>=${hi}`];
+    if (op === '<=') return [`<${hi}`];
+  }
+  return [`${op === '' ? '=' : op}${M}.${m1}.${p}${pre}`];
+}

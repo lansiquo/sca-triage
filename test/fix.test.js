@@ -266,3 +266,67 @@ test('every grouped npm argument is still checked, and a refusal rolls back', as
   assert.deepEqual(npm.calls, []);
   assert.equal(readFileSync(join(app, 'package.json'), 'utf8'), pkgBefore);
 });
+
+test('a pinned direct dependency also gets an override for parents whose range excludes the target', () => {
+  const plan = planFixes({ findings: [finding({
+    direct: true, declaredBy: [{ owner: '', kind: 'prod' }], requiredBy: ['express', 'other', 'tool'],
+    requiredSpecs: [{ by: 'express', spec: '1.0.0' }, { by: 'other', spec: '^1.0.0' }, { by: 'tool', spec: 'github:o/r' }],
+    fix: { target: '1.0.5' },
+  })] });
+  const [a] = plan.actions;
+  assert.deepEqual(a.pins, [{ owner: '', dev: false }]);
+  // express pins 1.0.0 exactly; "other" accepts 1.0.5; an unreadable spec is left alone.
+  assert.deepEqual(a.overrides, [{ scope: 'express', name: 'x', spec: '1.0.5' }]);
+});
+
+// A project where the vulnerable x@1.0.0 is nested under a (which requires it exactly),
+// next to a safe top-level x@1.0.5: npm keeps the nested copy unless its lock entry goes.
+function nestedProject(t) {
+  const dir = mkdtempSync(join(tmpdir(), 'sca-triage-nested-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'app', version: '1.0.0', dependencies: { a: '1.0.0', x: '1.0.5' }, devDependencies: { b: '1.0.0' } }, null, 2) + '\n');
+  writeFileSync(join(dir, 'index.js'), "require('a');\n");
+  writeFileSync(join(dir, 'package-lock.json'), JSON.stringify({ name: 'app', lockfileVersion: 3, packages: {
+    '': { name: 'app', version: '1.0.0', dependencies: { a: '1.0.0', x: '1.0.5' }, devDependencies: { b: '1.0.0' } },
+    'node_modules/a': { version: '1.0.0', dependencies: { x: '1.0.0' } },
+    'node_modules/a/node_modules/x': { version: '1.0.0', dependencies: { y: '1.0.0' } },
+    'node_modules/a/node_modules/x/node_modules/y': { version: '1.0.0' },
+    'node_modules/x': { version: '1.0.5' },
+    // A dev-only copy: P2, so outside a P1 plan, but the "a" > "x" override covers it too.
+    'node_modules/b': { version: '1.0.0', dev: true, dependencies: { a: '1.0.0' } },
+    'node_modules/b/node_modules/a': { version: '1.0.0', dev: true, dependencies: { x: '1.0.1' } },
+    'node_modules/b/node_modules/a/node_modules/x': { version: '1.0.1', dev: true },
+    // Bundled in b's tarball: npm restores it from the bundle, so it is left alone.
+    'node_modules/b/node_modules/a/node_modules/c': { version: '1.0.0', dev: true, inBundle: true, dependencies: { x: '1.0.0' } },
+    'node_modules/b/node_modules/a/node_modules/c/node_modules/x': { version: '1.0.0', dev: true, inBundle: true },
+  } }, null, 2) + '\n');
+  return dir;
+}
+const NESTED_LOOKUPS = {
+  advisoryLookup: async () => ({ x: [{ ghsa: 'G-x', severity: 'high', vulnerableVersions: '<1.0.5' }] }),
+  versionLookup: async () => ['1.0.0', '1.0.5'],
+};
+
+test('fix drops the lock entries of nested copies an override targets, so npm resolves them again', async (t) => {
+  const dir = nestedProject(t);
+  const lockAtInstall = [];
+  const exec = (cmd, args) => {
+    if (args.join(' ') === 'install --ignore-scripts') lockAtInstall.push(Object.keys(JSON.parse(readFileSync(join(dir, 'package-lock.json'), 'utf8')).packages));
+    return { code: 0, output: args[0] === 'sbom' ? '{}' : 'ok' };
+  };
+  const r = await applyFixes(dir, { lookups: NESTED_LOOKUPS, minPriority: 'P1', runTests: false, exec });
+  assert.deepEqual(r.plan.actions.map((a) => a.from), [['1.0.0']]);   // the dev copy is not in the plan
+  assert.deepEqual(lockAtInstall, [['', 'node_modules/a', 'node_modules/x', 'node_modules/b', 'node_modules/b/node_modules/a',
+    'node_modules/b/node_modules/a/node_modules/c', 'node_modules/b/node_modules/a/node_modules/c/node_modules/x']]);
+  assert.ok(r.changes.includes('package.json overrides: "a" > "x": "1.0.5"'));
+  assert.ok(r.changes.includes('package-lock.json: re-resolve x@1.0.0 at node_modules/a/node_modules/x'));
+  assert.ok(r.changes.includes('package-lock.json: re-resolve x@1.0.1 at node_modules/b/node_modules/a/node_modules/x'));
+});
+
+test('a failed install after dropping lock entries restores the original lockfile', async (t) => {
+  const dir = nestedProject(t);
+  const lockBefore = readFileSync(join(dir, 'package-lock.json'), 'utf8');
+  const exec = (cmd, args) => ({ code: args.join(' ') === 'install --ignore-scripts' ? 1 : 0, output: 'npm ERR! simulated failure' });
+  await assert.rejects(applyFixes(dir, { lookups: NESTED_LOOKUPS, runTests: false, exec }), /Fix rolled back/);
+  assert.equal(readFileSync(join(dir, 'package-lock.json'), 'utf8'), lockBefore);
+});

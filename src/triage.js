@@ -143,6 +143,7 @@ export async function triage(projectDir, { advisoryLookup = fetchAdvisories, ver
       direct: install.direct,
       declaredBy: install.declaredBy,
       requiredBy: install.requiredBy,
+      requiredSpecs: install.requiredSpecs,
       copiesInstalled: copiesByName.get(install.name),
       devOnly: install.dev,
       via: install.via,
