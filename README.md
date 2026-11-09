@@ -66,8 +66,9 @@ bundled. Without `--min-priority`, `fix` works through every priority.
 
 `fix` applies the 12 upgrades to the copy. NodeGoat's `npm test` runs no tests (its unit-test folder
 doesn't exist), so the run uses `--no-tests` and the report marks the upgrades unverified. The rescan
-finds 164 vulnerable packages and 1 P1, `swig`. The [case study](https://dotrobin.dev/sca-triage.html)
-shows the full output of each step.
+finds 164 vulnerable packages and 1 P1, `swig`. Counts follow the advisory database and the versions
+npm installs at the time, so a new run can differ slightly. The
+[case study](https://dotrobin.dev/sca-triage.html) shows the full output of each step.
 
 ## Use it on your project
 
