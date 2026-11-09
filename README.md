@@ -16,7 +16,51 @@ schedule, and evidence that the fix didn't break anything. Its SAST companion,
 > Use it locally only; don't deploy it or copy its versions. Dependabot alerts on this repository are
 > expected. The scanner itself (`bin/`, `src/`) has no dependencies.
 
-## Quick start
+## Try the lab
+
+One command runs the whole lab (Node.js 20 or newer, with access to `registry.npmjs.org`):
+
+```bash
+git clone https://github.com/lansiquo/sca-triage.git
+cd sca-triage
+npm run lab
+```
+
+It runs these steps in order, prints each command before it runs, and stops if any result is not
+the expected one:
+
+```bash
+npm ci --prefix lab/vulnerable-app --ignore-scripts --no-audit --no-fund   # install the vulnerable app
+node bin/sca-triage.js scan lab/vulnerable-app                             # 4 vulnerable, P1 gate fails (expected)
+node bin/sca-triage.js plan lab/vulnerable-app                             # dry run: the 4 upgrades
+cp -r lab/vulnerable-app <run>/app                                         # copy to a new temp folder
+node bin/sca-triage.js fix <run>/app --evidence <run>/evidence             # upgrade, test, rescan
+node bin/sca-triage.js scan <run>/app                                      # 0 vulnerable, gate passes
+cat <run>/evidence/REPORT.md                                               # the saved report
+```
+
+`<run>` is a new temporary folder for each run, so `lab/vulnerable-app` never changes and you can run
+the lab again without cleaning up. The last lines print where the fixed copy and evidence are.
+
+What the first scan finds (one line per finding; counts and versions follow the advisory database):
+
+```text
+intentionally-vulnerable-export-job: 33 packages scanned, 4 vulnerable (P1: 3, P2: 1, P3: 0)
+
+[P1] minimist@1.2.5  CRITICAL   imported by your code (src/export-job.js:7)   fix: 1.2.6
+[P1] axios@1.6.0     HIGH       imported by your code (src/notify.js:7)       fix: 1.20.0
+[P1] semver@7.5.1    HIGH       imported by your code (src/export-job.js:8)   fix: 7.5.2
+[P2] tar@6.1.0       CRITICAL   not imported                                  fix: 7.5.21 (major)
+
+Gate (--fail-on P1): FAIL
+```
+
+`tar` has a critical advisory but ranks P2 because nothing loads it. After `fix`, the copy scans 37
+packages with none vulnerable, the 5 functional tests still pass, and the lab's minimist
+prototype-pollution test (GHSA-xvch-5gv4-984h) goes from failing to passing. The
+[CI lab gate](.github/workflows/ci.yml) checks this on every push to `main` and every pull request.
+
+## Use it on your project
 
 Requires Node.js 20 or newer and access to `registry.npmjs.org`. A scan reads `package.json` and
 `package-lock.json` only, so it doesn't need `node_modules`.
@@ -92,53 +136,6 @@ you pass `--no-tests`, the changes are applied and marked **unverified**.
 | 0 | No finding meets `--fail-on` | Plan shown, or upgrades applied and tests passed (or marked unverified) |
 | 1 | A finding meets `--fail-on` (default `P1`) | Tests failed after the upgrade |
 | 2 | Usage or input error: bad option, missing or v1 lockfile, invalid `SCA_TRIAGE_REGISTRY`, registry error | Same, plus a failed `npm install` |
-
-## Try the lab
-
-Copy and paste these commands. Each scan names the folder it scans, so it's clear which copy you're
-looking at:
-
-```bash
-git clone https://github.com/lansiquo/sca-triage.git
-cd sca-triage
-npm ci --prefix lab/vulnerable-app --ignore-scripts --no-audit --no-fund
-node bin/sca-triage.js scan lab/vulnerable-app
-node bin/sca-triage.js plan lab/vulnerable-app
-run=$(mktemp -d)
-cp -r lab/vulnerable-app "$run/app"
-node bin/sca-triage.js fix "$run/app" --evidence "$run/evidence"
-node bin/sca-triage.js scan "$run/app"
-cat "$run/evidence/REPORT.md"
-```
-
-1. `npm ci` installs the intentionally vulnerable app, with install scripts disabled.
-2. The first `scan` finds 4 vulnerable packages and the P1 gate fails (exit code 1, expected).
-3. `plan` shows the upgrades without changing anything.
-4. `mktemp -d` makes a new, empty temporary folder, and `cp` copies the app into it. `fix` applies the
-   upgrades to that copy, runs its tests and saves evidence next to it.
-5. The second `scan` checks the fixed copy: no known vulnerabilities, and the gate passes.
-6. `cat` prints the saved `REPORT.md`.
-
-`lab/vulnerable-app` itself is never changed, and each run gets its own temporary folder, so you can
-run the lab again without deleting anything.
-
-Lab scan, condensed to one line per finding (counts and versions follow the advisory database):
-
-```text
-intentionally-vulnerable-export-job: 33 packages scanned, 4 vulnerable (P1: 3, P2: 1, P3: 0)
-
-[P1] minimist@1.2.5  CRITICAL   imported by your code (src/export-job.js:7)   fix: 1.2.6
-[P1] axios@1.6.0     HIGH       imported by your code (src/notify.js:7)       fix: 1.20.0
-[P1] semver@7.5.1    HIGH       imported by your code (src/export-job.js:8)   fix: 7.5.2
-[P2] tar@6.1.0       CRITICAL   not imported                                  fix: 7.5.21 (major)
-
-Gate (--fail-on P1): FAIL
-```
-
-`tar` has a critical advisory but ranks P2 because nothing loads it. After the fix, no vulnerable
-packages remain, the 5 functional tests still pass, and the lab's minimist prototype-pollution test
-(GHSA-xvch-5gv4-984h) goes from failing to passing. The [CI lab gate](.github/workflows/ci.yml)
-checks this on every push to `main` and every pull request.
 
 ## Scope and limits
 
