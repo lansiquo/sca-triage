@@ -118,6 +118,26 @@ export function loadProject(dir) {
     }
   }
 
+  // A bundled copy ships inside the tarball of the nearest package above it that is not
+  // bundled itself. npm overrides cannot change it; only a new version of that package can.
+  // A copy bundled by the project (or a workspace) itself has no such package.
+  for (const item of installs) {
+    item.bundledIn = null;
+    if (!item.inBundle) continue;
+    let base = item.path;
+    for (;;) {
+      const i = base.lastIndexOf('/node_modules/');
+      if (i === -1) break;
+      base = base.slice(0, i);
+      const parent = byPath.get(base);
+      if (!parent) break;
+      if (!parent.inBundle) {
+        item.bundledIn = { name: parent.name, version: parent.version, path: parent.path };
+        break;
+      }
+    }
+  }
+
   // Which installed packages require each copy (used to scope npm overrides).
   for (const item of installs) {
     for (const d of item.dependsOn) {

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { formatMarkdown, formatTable, formatTestsLine, escapeMarkdown, codeSpan } from '../src/report.js';
+import { formatMarkdown, formatTable, formatTestsLine, escapeMarkdown, codeSpan, upgradeText, formatBundled } from '../src/report.js';
 
 const finding = (overrides = {}) => ({
   priority: 'P1',
@@ -68,4 +68,21 @@ test('the fix output says when the tests already failed before the upgrade', () 
     'Tests (npm test): FAILED (also failed before the upgrade, so this failure may not be caused by it)',
   );
   assert.equal(formatTestsLine({ tests: null, testsSkipped: 'disabled with --no-tests' }), 'Tests: not run — changes applied but UNVERIFIED (disabled with --no-tests)');
+});
+
+test('a bundled finding names the package to upgrade instead of an override', () => {
+  const f = { version: '1.0.0', direct: false, fix: { target: '1.0.5', crossesMajor: false }, bundledIn: { name: 'tool', version: '2.0.0', path: 'node_modules/tool' } };
+  assert.equal(upgradeText(f), 'bundled in tool@2.0.0: upgrade tool');
+  assert.equal(upgradeText({ ...f, bundledIn: null }), '1.0.0 -> 1.0.5 (override)');
+  assert.equal(upgradeText({ ...f, bundledIn: { name: 'a|b', version: '1.0.0' } }, escapeMarkdown), `bundled in ${escapeMarkdown('a|b@1.0.0')}: upgrade ${escapeMarkdown('a|b')}`);
+});
+
+test('bundled copies are grouped by the package that ships them', () => {
+  const b = (name, version, owner) => ({ package: name, installedAs: name, version, bundledIn: { name: owner, version: '1.0.0' } });
+  assert.deepEqual(formatBundled([b('x', '1.0.0', 'tool'), b('a', '2.0.0', 'tool'), b('x', '1.0.0', 'tool'), b('y', '3.0.0', 'cli')]), [
+    "Bundled inside other packages (npm overrides can't change these; upgrade the package that bundles them):",
+    '  cli@1.0.0: y@3.0.0',
+    '  tool@1.0.0: a@2.0.0, x@1.0.0',
+  ]);
+  assert.deepEqual(formatBundled([]), []);
 });

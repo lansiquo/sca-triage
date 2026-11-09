@@ -330,3 +330,14 @@ test('a failed install after dropping lock entries restores the original lockfil
   await assert.rejects(applyFixes(dir, { lookups: NESTED_LOOKUPS, runTests: false, exec }), /Fix rolled back/);
   assert.equal(readFileSync(join(dir, 'package-lock.json'), 'utf8'), lockBefore);
 });
+
+test('bundled copies are listed for a parent upgrade, never planned as overrides', () => {
+  const bundledIn = { name: 'tool', version: '2.0.0', path: 'node_modules/tool' };
+  const plan = planFixes({ findings: [
+    finding({ path: 'node_modules/tool/node_modules/x', requiredBy: ['tool'], copiesInstalled: 2, bundledIn, fix: { target: '1.0.5' } }),
+    finding({ path: 'node_modules/other/node_modules/x', requiredBy: ['other'], copiesInstalled: 2, fix: { target: '1.0.5' } }),
+  ] });
+  assert.deepEqual(plan.bundled.map((f) => f.path), ['node_modules/tool/node_modules/x']);
+  assert.deepEqual(plan.actions.flatMap((a) => a.overrides), [{ scope: 'other', name: 'x', spec: '1.0.5' }]);
+  assert.deepEqual(plan.unfixable, []);
+});

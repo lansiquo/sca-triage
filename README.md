@@ -163,7 +163,8 @@ so you can see what broke, and it exits with code 1.
 3. Fixes vulnerable packages that your dependencies pull in with npm `overrides` in `package.json`,
    scoped to the packages that need them. A package that requires a version the pin excludes gets
    an override too. Old nested copies the overrides cover are removed from `package-lock.json`
-   first, so npm installs the new version instead of keeping the old one.
+   first, so npm installs the new version instead of keeping the old one. Copies bundled inside
+   another package can't be changed this way; they are listed under the package to upgrade.
 4. Installs with `--ignore-scripts`, so no install scripts run.
 5. Runs `npm test` again and rescans. If the tests also failed in the baseline run, the output says
    so, since the failure may not be caused by the upgrade.
@@ -182,9 +183,6 @@ stops with exit code 2.
 It prefers a fix on the same release line. A major upgrade is applied only when no same-major fix
 exists, and it is flagged in the plan and the report.
 
-> **Changed since v1.0.0:** `fix` on its own now applies the upgrades; it used to be a dry run.
-> Use `plan` to preview. `fix --apply` still works.
-
 ## Exit codes
 
 | Code | `scan` | `plan` / `fix` |
@@ -201,8 +199,8 @@ exists, and it is flagged in the plan and the report.
   vulnerable function runs. Reachability only lowers priority; it never hides a finding.
 - **Tests are the safety net.** An upgrade is only as verified as the project's test suite.
   `fix` runs that suite, so use it on projects whose test scripts you trust.
-- **Bundled dependencies** ship inside their parent package, so overrides can't change them. They
-  stay in the rescan.
+- **Bundled dependencies** ship inside another package's tarball, so overrides can't change them.
+  `scan`, `plan` and `fix` name the package that bundles them; upgrading it is up to you.
 - **Results reflect the advisory database at scan time.** Zero findings is not a certification.
 - **Mirrors:** `SCA_TRIAGE_REGISTRY` points at another registry. It must be `https://`
   (`http://` only for this machine) with no credentials in the URL.
@@ -211,4 +209,5 @@ exists, and it is flagged in the plan and the report.
 
 - [SECURITY.md](SECURITY.md): how the tool treats untrusted input, and how to report an issue
 - [ARCHITECTURE.md](ARCHITECTURE.md): components, ranking, upgrade planning, trust boundaries and failure handling, with a diagram
+- [CHANGELOG.md](CHANGELOG.md): what changed in each release
 - [Case study](https://dotrobin.dev/sca-triage.html): design and a run on OWASP NodeGoat

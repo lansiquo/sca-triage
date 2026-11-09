@@ -37,7 +37,24 @@ export function displayName(f) {
   return f.installedAs && f.installedAs !== f.package ? `${f.installedAs} (npm:${f.package})` : f.package;
 }
 
-function upgradeText(f, esc = plain) {
+// Plan and fix output: vulnerable copies that ship inside another package's tarball,
+// grouped by that package, since upgrading it is the only way to change them.
+export function formatBundled(findings) {
+  const groups = new Map();
+  for (const f of findings) {
+    const key = `${f.bundledIn.name}@${f.bundledIn.version}`;
+    if (!groups.has(key)) groups.set(key, new Set());
+    groups.get(key).add(`${displayName(f)}@${f.version}`);
+  }
+  if (!groups.size) return [];
+  return [
+    "Bundled inside other packages (npm overrides can't change these; upgrade the package that bundles them):",
+    ...[...groups].sort(([a], [b]) => a.localeCompare(b)).map(([owner, copies]) => `  ${plain(owner)}: ${plain([...copies].sort().join(', '))}`),
+  ];
+}
+
+export function upgradeText(f, esc = plain) {
+  if (f.bundledIn) return `bundled in ${esc(`${f.bundledIn.name}@${f.bundledIn.version}`)}: upgrade ${esc(f.bundledIn.name)}`;
   if (!f.fix.target) return 'no fixed version published';
   return `${esc(f.version)} -> ${f.fix.target}${f.fix.crossesMajor ? ' (major upgrade)' : ''}${f.direct ? '' : ' (override)'}`;
 }

@@ -6,7 +6,7 @@ import { resolve, join } from 'node:path';
 import { writeFileSync } from 'node:fs';
 import { triage, gateFails } from '../src/triage.js';
 import { planFixes, applyFixes } from '../src/fix.js';
-import { formatTable, formatMarkdown, formatTestsLine, displayName, plain } from '../src/report.js';
+import { formatTable, formatMarkdown, formatTestsLine, displayName, plain, formatBundled } from '../src/report.js';
 
 const HELP = `Usage:
   sca-triage scan [dir] [--json] [--markdown <file>] [--fail-on P1|P2|P3|none]
@@ -97,6 +97,7 @@ async function main() {
         );
       }
       for (const f of plan.unfixable) process.stdout.write(plain(`${displayName(f)}@${f.version}: no fixed version published yet`) + '\n');
+      for (const line of formatBundled(plan.bundled)) process.stdout.write(line + '\n');
       for (const w of result.warnings || []) process.stderr.write(`warning: ${plain(w)}\n`);
       process.stdout.write('\nDry run: nothing was changed. Run "sca-triage fix" to apply these upgrades.\n');
       return 0;
@@ -104,6 +105,7 @@ async function main() {
     const evidenceDir = opts.evidence ? resolve(opts.evidence) : join(dir, 'evidence', new Date().toISOString().replace(/[:.]/g, '-'));
     const r = await applyFixes(dir, { minPriority, evidenceDir, runTests: !opts.noTests });
     process.stdout.write(`Upgraded ${r.plan.actions.length} package(s):\n${r.changes.map((c) => `  ${plain(c)}`).join('\n')}\n`);
+    for (const line of formatBundled(r.plan.bundled)) process.stdout.write(line + '\n');
     for (const w of new Set([...(r.before.warnings || []), ...(r.after.warnings || [])])) process.stderr.write(`warning: ${plain(w)}\n`);
     process.stdout.write(`${formatTestsLine(r)}\n`);
     process.stdout.write(`After: ${r.after.findings.length} vulnerable packages (P1: ${r.after.summary.P1}, P2: ${r.after.summary.P2}, P3: ${r.after.summary.P3})\n`);

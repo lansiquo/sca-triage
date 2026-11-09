@@ -32,7 +32,7 @@ flowchart TD
 | File | Responsibility |
 |---|---|
 | `bin/sca-triage.js` | CLI: parses `scan`, `plan` and `fix` and their options, rejects an unknown option or a second directory (exit 2), prints results and maps them to exit codes. |
-| `src/lockfile.js` | Reads `package.json` and `package-lock.json` (v1 is rejected). Lists every installed copy with its path, version, alias, owning workspace and dev, optional and bundled flags; which packages require it and with what spec; and which direct dependencies lead to it. |
+| `src/lockfile.js` | Reads `package.json` and `package-lock.json` (v1 is rejected). Lists every installed copy with its path, version, alias, owning workspace, dev and optional flags and the package that bundles it, if any; which packages require it and with what spec; and which direct dependencies lead to it. |
 | `src/advisories.js` | Registry client: the bulk advisory endpoint (`/-/npm/v1/security/advisories/bulk`) and abbreviated package metadata for published versions. Each request has a 30 s timeout; network errors, timeouts, 429 and 5xx get up to 3 attempts, honouring `Retry-After` (capped at 10 s). Validates `SCA_TRIAGE_REGISTRY` and rejects malformed responses. |
 | `src/reachability.js` | Finds which packages the project's own code loads: `require()`, `import`, `export … from`, dynamic `import()` and `createRequire()` in JavaScript, TypeScript, JSX/TSX, Vue, Svelte and Astro files and extensionless Node scripts. Separates runtime from test code. |
 | `src/semver.js` | Version parsing and comparison, advisory ranges (`satisfies`) and npm dependency specs such as `^`, `~` and x-ranges (`acceptsVersion`). |
@@ -71,7 +71,8 @@ Reachability only lowers priority; every vulnerable copy is still reported.
 - **Re-checks.** The registry only returns advisories for the versions it is asked about, so each new candidate target is looked up too: one batched request per round, up to 5 rounds, picking again until no target changes. A target still unconfirmed after 5 rounds is kept with a warning.
 - **Direct dependencies** are pinned with `npm install name@target --save-exact`, grouped into one install per manifest (root or workspace) and dependency type.
 - **Other copies** get npm `overrides`: one global entry when every installed copy is in the plan, wants the same target and none is a direct dependency; otherwise entries scoped to the packages that require each copy. A package whose range excludes a pinned target (for example `express` requiring `body-parser` 1.18.3) gets a scoped override too.
-- **Stale copies.** npm keeps a locked nested copy that an override rejects and lists it as invalid. Before the overrides install, `fix` removes the lock entries of every nested copy an override covers that is not at the override's version, so npm resolves them again. Bundled copies are skipped: they come from their parent's tarball.
+- **Stale copies.** npm keeps a locked nested copy that an override rejects and lists it as invalid. Before the overrides install, `fix` removes the lock entries of every nested copy an override covers that is not at the override's version, so npm resolves them again.
+- **Bundled copies** ship inside the tarball of the package above them, which npm overrides cannot change. They get no pin or override; `scan` shows "bundled in <package>: upgrade <package>", and `plan` and `fix` list them grouped by that package. A copy bundled by the project itself is fixed normally.
 - **Scope.** All priorities are planned unless `--min-priority` narrows it.
 
 ## Trust boundaries
@@ -100,6 +101,6 @@ Reachability only lowers priority; every vulnerable copy is still reported.
 
 - Package managers other than npm, and `package-lock.json` v1.
 - Proving exploitability: reachability is import-level, with no call graph.
-- Bundled dependencies, which overrides cannot change.
+- Upgrading the packages that bundle vulnerable copies; `plan` names them, and the upgrade is manual.
 - Vulnerabilities missing from the GitHub Advisory Database; results reflect the database at scan time, and zero findings is not a certification.
 - Source-code flaws (see [sast-triage](https://github.com/lansiquo/sast-triage)), secrets and infrastructure code.

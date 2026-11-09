@@ -88,3 +88,24 @@ test('each copy records the spec every package that requires it asks for', async
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('a bundled copy records the package whose tarball ships it', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sca-triage-bundled-'));
+  try {
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'app', dependencies: { tool: '1.0.0', own: '1.0.0' }, bundleDependencies: ['own'] }));
+    writeFileSync(join(dir, 'package-lock.json'), JSON.stringify({ lockfileVersion: 3, packages: {
+      '': { name: 'app', dependencies: { tool: '1.0.0', own: '1.0.0' } },
+      'node_modules/tool': { version: '1.0.0', bundleDependencies: ['a'], dependencies: { a: '1.0.0' } },
+      'node_modules/tool/node_modules/a': { version: '1.0.0', inBundle: true, dependencies: { b: '1.0.0' } },
+      'node_modules/tool/node_modules/a/node_modules/b': { version: '1.0.0', inBundle: true },
+      'node_modules/own': { version: '1.0.0', inBundle: true },
+    } }));
+    const at = (path) => loadProject(dir).installs.find((i) => i.path === path).bundledIn;
+    assert.deepEqual(at('node_modules/tool/node_modules/a'), { name: 'tool', version: '1.0.0', path: 'node_modules/tool' });
+    assert.deepEqual(at('node_modules/tool/node_modules/a/node_modules/b'), { name: 'tool', version: '1.0.0', path: 'node_modules/tool' });
+    assert.equal(at('node_modules/own'), null);   // bundled by the project itself: npm install can change it
+    assert.equal(at('node_modules/tool'), null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

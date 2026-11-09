@@ -51,8 +51,11 @@ function installSpec(f, target) {
 export function planFixes(result, { minPriority = 'P3' } = {}) {
   const threshold = priorityRank(minPriority);
   const selected = result.findings.filter((f) => priorityRank(f.priority) >= threshold);
-  const unfixable = selected.filter((f) => !f.fix.target);
-  const fixable = selected.filter((f) => f.fix.target);
+  // Copies bundled inside another package's tarball: npm overrides can't reach them, so
+  // they are listed for a manual upgrade of that package instead of planned.
+  const bundled = selected.filter((f) => f.bundledIn);
+  const unfixable = selected.filter((f) => !f.bundledIn && !f.fix.target);
+  const fixable = selected.filter((f) => !f.bundledIn && f.fix.target);
 
   const byName = new Map(); // installed name -> findings
   for (const f of fixable) {
@@ -120,7 +123,7 @@ export function planFixes(result, { minPriority = 'P3' } = {}) {
       actions.push(action);
     }
   }
-  return { actions, unfixable };
+  return { actions, unfixable, bundled };
 }
 
 // Merge planned overrides into a package.json "overrides" object, following npm's
