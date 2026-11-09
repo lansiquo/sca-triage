@@ -135,7 +135,7 @@ you pass `--no-tests`, the changes are applied and marked **unverified**.
 |---|---|---|
 | 0 | No finding meets `--fail-on` | Plan shown, or upgrades applied and tests passed (or marked unverified) |
 | 1 | A finding meets `--fail-on` (default `P1`) | Tests failed after the upgrade |
-| 2 | Usage or input error: bad option, missing or v1 lockfile, invalid `SCA_TRIAGE_REGISTRY`, registry error | Same, plus a failed `npm install` |
+| 2 | Usage or input error: bad option, more than one directory, missing or v1 lockfile, invalid `SCA_TRIAGE_REGISTRY`, registry error | Same, plus a failed `npm install` |
 
 ## Scope and limits
 

@@ -29,7 +29,8 @@ Priorities:
   P2  high/critical but not loaded at runtime, or moderate and loaded
   P3  everything else
 
-Exit code 2 means a usage or input error (bad option, missing lockfile, registry error).
+Exit code 2 means a usage or input error (bad option, more than one directory, missing
+lockfile, registry error).
 Advisories come from registry.npmjs.org; set SCA_TRIAGE_REGISTRY to use an https:// mirror.
 `;
 
