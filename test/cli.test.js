@@ -89,3 +89,11 @@ test('fix rejects --dry-run combined with --apply', () => {
   const r = run('fix', fixture, '--dry-run', '--apply');
   assert.equal(r.status, 2);
 });
+
+test('a second directory is a usage error, not silently ignored', () => {
+  for (const cmd of ['scan', 'plan', 'fix']) {
+    const r = run(cmd, fixture, '/tmp/another-dir');
+    assert.equal(r.status, 2, cmd);
+    assert.match(r.stderr, /takes one directory, got 2/);
+  }
+});
