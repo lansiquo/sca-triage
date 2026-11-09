@@ -1,24 +1,15 @@
 # Intentionally vulnerable demo app
 
 > [!WARNING]
-> **This app is intentionally vulnerable.** Its dependencies are pinned to known-vulnerable
-> versions on purpose. It exists only to be scanned, tested and upgraded by `sca-triage`.
-> Don't deploy it, don't expose it to a network, and don't reuse its dependency versions.
+> **Intentionally vulnerable.** Dependencies are pinned to known-vulnerable versions for `sca-triage` to scan, test and upgrade. Don't deploy it, expose it to a network, or reuse its versions.
 
-A small "evidence export job" that parses option tokens from a less-trusted submitter.
-
-| Dependency | Pinned version | Used by the code? | Why it's here |
+| Dependency | Version | Imported? | Purpose |
 |---|---|---|---|
-| `minimist` | 1.2.5 | yes, parses options | Prototype pollution (GHSA-xvch-5gv4-984h), proven by `test/security.test.js` |
-| `semver` | 7.5.1 | yes, checks client versions | ReDoS advisory (GHSA-c2qf-rxjj-qqgw) |
-| `axios` | 1.6.0 | yes, builds a notification (never sends it) | Many advisories; shows a large upgrade jump |
-| `tar` | 6.1.0 | **no** | Critical advisories but never loaded, so it ranks lower (P2) and needs a major upgrade |
+| `minimist` | 1.2.5 | yes | Prototype pollution (GHSA-xvch-5gv4-984h), proven by a test |
+| `semver` | 7.5.1 | yes | ReDoS (GHSA-c2qf-rxjj-qqgw) |
+| `axios` | 1.6.0 | yes (never sends) | Many advisories; a large upgrade |
+| `tar` | 6.1.0 | **no** | Critical but never loaded, so ranked P2 |
 
-Tests:
+`test/functional.test.js` passes before and after the fix; `test/security.test.js` fails on minimist 1.2.5 and passes after.
 
-- `test/functional.test.js` passes on both the vulnerable and the fixed versions.
-- `test/security.test.js` fails on minimist 1.2.5 and passes after the upgrade.
-
-Run the whole lab from the repository root with `npm run lab`. It installs this app with
-`--ignore-scripts`, scans it, and runs `sca-triage fix` on a **copy** in a new temporary folder,
-so this folder keeps its vulnerable starting point.
+Run `npm run lab` from the repository root. It installs with `--ignore-scripts`, scans, and fixes a temporary **copy**, leaving this folder unchanged.
