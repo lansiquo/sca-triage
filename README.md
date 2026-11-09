@@ -115,21 +115,63 @@ Each finding gets a reachability level: `imported` (your runtime code requires o
 covers `require`, `import`, dynamic `import()` and `createRequire()` across JS, TS, JSX/TSX, Vue,
 Svelte and Astro sources, and follows workspaces and aliased packages.
 
-## What `fix` does
+## Fix your own project
 
-Preview first with `plan` (or `fix --dry-run`); it changes nothing. Then `fix`:
+`fix` edits your project, so start from a clean git working tree. It runs your `npm test` before
+and after upgrading, so use it only on projects whose tests you trust.
+
+1. **Preview.** Lists each upgrade and changes nothing (`fix --dry-run` does the same):
+
+   ```bash
+   node sca-triage/bin/sca-triage.js plan /path/to/project
+   ```
+
+2. **Apply.** Upgrades, runs your tests, rescans and saves an evidence folder:
+
+   ```bash
+   node sca-triage/bin/sca-triage.js fix /path/to/project
+   ```
+
+   - `--min-priority P1` fixes only P1 findings. By default every priority is fixed.
+   - `--no-tests` skips the tests; the upgrades are then marked **unverified**. A project with no
+     `test` script gets the same.
+   - `--evidence <dir>` saves the evidence elsewhere (default `<project>/evidence/<timestamp>`).
+
+3. **Check the result.** The last lines show whether your tests passed after the upgrade and how
+   many vulnerable packages are left. `REPORT.md` in the evidence folder lists the findings before
+   and after, every change and both test runs.
+
+4. **Keep or undo.** Review the changes with `git diff`, then commit them. To undo, restore the
+   files and reinstall (also restore any workspace `package.json` that changed):
+
+   ```bash
+   git restore package.json package-lock.json
+   ```
+
+   ```bash
+   npm ci
+   ```
+
+If an install fails, `fix` puts `package.json` and `package-lock.json` back itself and exits with
+code 2; run `npm ci` to reset `node_modules`. If your tests fail after the upgrade, the changes stay
+so you can see what broke, and it exits with code 1.
+
+### What `fix` changes
 
 1. Runs `npm test` for a baseline.
-2. Pins vulnerable direct dependencies to the safe version (`--save-exact`), with one `npm install`
-   per manifest and dependency type. Transitive ones get npm `overrides`, scoped to their parent
-   when copies need different versions. A package that requires a version the pin excludes gets a
-   scoped override too. Before installing the overrides, nested copies they cover are removed from
-   `package-lock.json` so npm resolves them again; otherwise npm keeps them as "invalid".
-3. Installs with `--ignore-scripts`.
-4. Runs `npm test` again and rescans. If the tests also failed in the baseline run, the output
-   says so, since the failure may not be caused by the upgrade.
-5. Writes an evidence folder (`--evidence <dir>`, default `<project>/evidence/<timestamp>`):
-   `REPORT.md`, `before.json`, `after.json`, both lockfiles, both test logs and a CycloneDX SBOM.
+2. Pins each vulnerable direct dependency to its safe version with
+   `npm install name@version --save-exact`, one install per manifest and dependency type.
+3. Fixes vulnerable packages that your dependencies pull in with npm `overrides` in `package.json`,
+   scoped to the packages that need them. A package that requires a version the pin excludes gets
+   an override too. Old nested copies the overrides cover are removed from `package-lock.json`
+   first, so npm installs the new version instead of keeping the old one.
+4. Installs with `--ignore-scripts`, so no install scripts run.
+5. Runs `npm test` again and rescans. If the tests also failed in the baseline run, the output says
+   so, since the failure may not be caused by the upgrade.
+6. Writes the evidence folder: `REPORT.md`, `before.json`, `after.json`, both lockfiles, both test
+   logs and a CycloneDX SBOM.
+
+### How upgrades are chosen
 
 The target is the smallest published version outside every advisory range, including advisories
 that only affect versions newer than the installed one. The registry reports only advisories that
@@ -139,10 +181,7 @@ still unconfirmed after 5 rounds is kept and flagged with a warning. If a lookup
 stops with exit code 2.
 
 It prefers a fix on the same release line. A major upgrade is applied only when no same-major fix
-exists, and it is flagged. `--min-priority P1` limits fixes to P1. If there's no `test` script, or
-you pass `--no-tests`, the changes are applied and marked **unverified**. If an `npm install` step
-fails, `package.json`, any workspace manifests it pinned, and `package-lock.json` are restored, and
-`REPORT.md` records the failed command (`node_modules` is not restored: run `npm ci`). Failing tests after a clean upgrade keep the changes.
+exists, and it is flagged in the plan and the report.
 
 > **Changed since v1.0.0:** `fix` on its own now applies the upgrades; it used to be a dry run.
 > Use `plan` to preview. `fix --apply` still works.
