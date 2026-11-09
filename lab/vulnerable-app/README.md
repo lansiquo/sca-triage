@@ -19,6 +19,6 @@ Tests:
 - `test/functional.test.js` passes on both the vulnerable and the fixed versions.
 - `test/security.test.js` fails on minimist 1.2.5 and passes after the upgrade.
 
-Install it with `--ignore-scripts` (the repo's `npm run lab:install` does this). To try the
-upgrade, run `sca-triage fix` on a **copy** of this folder, so the lab keeps its
-vulnerable starting point.
+Run the whole lab from the repository root with `npm run lab`. It installs this app with
+`--ignore-scripts`, scans it, and runs `sca-triage fix` on a **copy** in a new temporary folder,
+so this folder keeps its vulnerable starting point.
