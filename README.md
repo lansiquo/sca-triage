@@ -95,24 +95,30 @@ you pass `--no-tests`, the changes are applied and marked **unverified**.
 
 ## Try the lab
 
+Copy and paste these commands. Each scan names the folder it scans, so it's clear which copy you're
+looking at:
+
 ```bash
+git clone https://github.com/lansiquo/sca-triage.git
 cd sca-triage
-npm run lab:install   # installs the intentionally vulnerable app, no install scripts
-npm run lab:scan      # rank its vulnerabilities
-npm run lab:plan      # show the planned upgrades (dry run)
-```
-
-Apply the fixes to a fresh copy so the lab keeps its vulnerable starting point:
-
-```bash
+npm ci --prefix lab/vulnerable-app --ignore-scripts --no-audit --no-fund
+node bin/sca-triage.js scan lab/vulnerable-app
+node bin/sca-triage.js plan lab/vulnerable-app
 rm -rf /tmp/lab-copy /tmp/lab-evidence
 cp -r lab/vulnerable-app /tmp/lab-copy
 node bin/sca-triage.js fix /tmp/lab-copy --evidence /tmp/lab-evidence
-node bin/sca-triage.js scan /tmp/lab-copy   # rescan the fixed copy: 0 vulnerable, gate passes
+node bin/sca-triage.js scan /tmp/lab-copy
+cat /tmp/lab-evidence/REPORT.md
 ```
 
-The report is saved to `/tmp/lab-evidence/REPORT.md`. Scanning `lab/vulnerable-app` again still shows
-the original findings.
+1. `npm ci` installs the intentionally vulnerable app, with install scripts disabled.
+2. The first `scan` finds 4 vulnerable packages and the P1 gate fails (exit code 1, expected).
+3. `plan` shows the upgrades without changing anything.
+4. `fix` applies them to a copy in `/tmp/lab-copy`, runs its tests and saves evidence to `/tmp/lab-evidence`.
+5. The second `scan` checks the fixed copy: no known vulnerabilities, and the gate passes.
+6. `cat` prints the saved `REPORT.md`.
+
+`lab/vulnerable-app` itself is never changed, so you can run the lab again.
 
 Lab scan, condensed to one line per finding (counts and versions follow the advisory database):
 
