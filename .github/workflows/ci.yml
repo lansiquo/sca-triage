@@ -69,6 +69,9 @@ jobs:
       - name: Gate must PASS after remediation
         run: node bin/sca-triage.js scan "$RUNNER_TEMP/remediated" --fail-on P1
 
+      - name: One-command lab (npm run lab) must complete
+        run: npm run lab
+
       - name: Upload remediation evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

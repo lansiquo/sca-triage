@@ -15,10 +15,7 @@
   },
   "scripts": {
     "test": "node --test test/*.test.js",
-    "lab": "node scripts/lab.js",
-    "lab:install": "npm ci --prefix lab/vulnerable-app --ignore-scripts --no-audit --no-fund",
-    "lab:scan": "node bin/sca-triage.js scan lab/vulnerable-app",
-    "lab:plan": "node bin/sca-triage.js plan lab/vulnerable-app"
+    "lab": "node scripts/lab.js"
   },
   "keywords": ["sca", "security", "npm", "vulnerability", "reachability", "supply-chain", "triage", "github-action", "sbom", "cyclonedx"]
 }

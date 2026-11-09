@@ -57,6 +57,9 @@ async function main() {
     process.stdout.write(HELP);
     return opts.help || opts.h ? 0 : 2; // asking for help succeeds; a missing command is a usage error
   }
+  if (opts._.length > 2) {
+    throw new Error(`${command} takes one directory, got ${opts._.length - 1}: ${opts._.slice(1).join(' ')}`);
+  }
   const dir = resolve(dirArg || '.');
 
   if (command === 'scan') {
