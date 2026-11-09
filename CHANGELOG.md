@@ -7,6 +7,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.2.2] - 2026-11-09
+
 ### Fixed
 - **Bundled dependencies.** A vulnerable copy that ships inside another package's tarball can't be
   changed by npm overrides, but `plan` and `fix` used to propose overrides for it anyway. Those
@@ -91,7 +93,8 @@ fixed release) instead of 3.
 - GitHub Action (`lansiquo/sca-triage@v1`).
 - A lab app with known-vulnerable dependencies (`lab/`) to try it on (removed in 1.2.1).
 
-[Unreleased]: https://github.com/lansiquo/sca-triage/compare/v1.2.1...HEAD
+[Unreleased]: https://github.com/lansiquo/sca-triage/compare/v1.2.2...HEAD
+[1.2.2]: https://github.com/lansiquo/sca-triage/compare/v1.2.1...v1.2.2
 [1.2.1]: https://github.com/lansiquo/sca-triage/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/lansiquo/sca-triage/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/lansiquo/sca-triage/compare/v1.0.0...v1.1.0

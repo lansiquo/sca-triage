@@ -91,14 +91,14 @@ sca-triage fix  [dir] [--min-priority P1|P2|P3] [--evidence <dir>] [--no-tests]
 - uses: actions/setup-node@v4
   with:
     node-version: 22
-- uses: lansiquo/sca-triage@v1.2.1
+- uses: lansiquo/sca-triage@v1.2.2
   with:
     path: .        # directory with package.json and package-lock.json
     fail-on: P1    # P1, P2, P3 or none
 ```
 
 Both inputs are optional (defaults shown). The step fails when the gate fails and adds the findings
-table to the job summary. No dependency install is needed. Pin a release tag such as `@v1.2.1`,
+table to the job summary. No dependency install is needed. Pin a release tag such as `@v1.2.2`,
 or a full commit SHA for the strictest supply-chain safety.
 
 ## How ranking works
