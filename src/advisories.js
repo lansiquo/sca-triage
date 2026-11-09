@@ -44,6 +44,8 @@ function isPlainObject(v) {
 }
 
 // installs: [{name, version}] -> { [name]: [{ghsa, title, severity, vulnerableVersions, url, cwe, cvss}] }
+// The registry returns only advisories that affect at least one of the versions sent,
+// so triage also sends its candidate upgrade targets through here.
 export async function fetchAdvisories(installs) {
   const query = new Map();
   for (const { name, version } of installs) {

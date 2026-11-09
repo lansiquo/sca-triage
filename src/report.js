@@ -73,6 +73,17 @@ function failingTests(output = '') {
   return [...output.matchAll(/^not ok \d+ - (.+)$/gm)].map((m) => m[1].trim());
 }
 
+// The one-line test result `fix` prints. When the tests also failed before the
+// upgrade, say so: the failure may not be the upgrade's fault.
+export function formatTestsLine({ tests, testsBefore, testsSkipped } = {}) {
+  if (!tests) return `Tests: not run — changes applied but UNVERIFIED (${testsSkipped || 'reason not recorded'})`;
+  if (tests.passed) return 'Tests (npm test): passed';
+  if (testsBefore && !testsBefore.passed) {
+    return 'Tests (npm test): FAILED (also failed before the upgrade, so this failure may not be caused by it)';
+  }
+  return 'Tests (npm test): FAILED';
+}
+
 export function formatMarkdown(before, after, extras = {}) {
   const row = (f) =>
     `| ${f.priority} | ${codeSpan(`${displayName(f)}@${f.version}`)} | ${escapeMarkdown(f.severity)} | ${f.advisories.length} | ${LEVEL_LABEL[f.reachability]} | ${upgradeText(f, escapeMarkdown)} |`;
