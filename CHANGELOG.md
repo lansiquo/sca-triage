@@ -7,7 +7,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [1.2.3] - 2026-11-09
+## [1.2.3] - 2026-11-10
 
 ### Fixed
 - **Advisory ranges with partial versions.** Real advisories use ranges like `>=13.0 <14.2.30`
