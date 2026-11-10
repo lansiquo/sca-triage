@@ -67,14 +67,14 @@ test('triage ranks findings and the gate fails only on P1 by default', async () 
 
 test('fix plan pins direct deps and overrides transitive ones with one target', async () => {
   const r = await triage(FIXTURE, lookups);
-  const plan = planFixes(r);
+  const plan = planFixes(r, { allowMajor: true }); // parser 0.9.1 -> 1.0.3 crosses the 0.x line
   const byName = Object.fromEntries(plan.actions.map((a) => [a.package, a]));
   assert.equal(byName.parser.direct, false); // transitive -> npm overrides
   assert.equal(byName.parser.target, '1.0.3'); // highest target across both copies
   assert.equal(byName['test-lib'].direct, true);
   assert.equal(byName['test-lib'].dev, true);
   assert.equal(byName['test-lib'].target, '3.1.0');
-  assert.deepEqual(planFixes(r, { minPriority: 'P1' }).actions.map((a) => a.package), ['parser']);
+  assert.deepEqual(planFixes(r, { minPriority: 'P1', allowMajor: true }).actions.map((a) => a.package), ['parser']);
   assert.throws(() => planFixes(r, { minPriority: 'garbage' }), /must be one of/);
 });
 

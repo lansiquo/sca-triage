@@ -41,13 +41,18 @@ test('copies on different major lines get their own target, scoped to their pare
   assert.deepEqual(byTarget['2.0.3'].overrides, [{ scope: 'b', name: 'x', spec: '2.0.3' }]);
 });
 
-test('crossesMajor is computed for every copy that shares a target', () => {
-  const plan = planFixes({
+test('crossesMajor is computed for every copy that shares a target, and majors wait for --allow-major', () => {
+  const result = {
     findings: [
       finding({ version: '1.9.0', path: 'node_modules/x', copiesInstalled: 2, fix: { target: '2.0.3', crossesMajor: true } }),
       finding({ version: '2.0.0', path: 'node_modules/a/node_modules/x', copiesInstalled: 2, fix: { target: '2.0.3' } }),
     ],
-  });
+  };
+  const held = planFixes(result);
+  assert.deepEqual(held.actions, []);
+  assert.deepEqual(held.major.map((a) => a.target), ['2.0.3']);
+  const plan = planFixes(result, { allowMajor: true });
+  assert.deepEqual(plan.major, []);
   assert.equal(plan.actions.length, 1);
   assert.equal(plan.actions[0].crossesMajor, true);
   assert.deepEqual(plan.actions[0].overrides, [{ scope: null, name: 'x', spec: '2.0.3' }]); // all copies, one target: global
@@ -159,7 +164,7 @@ function tempProject(t, { testScript = false } = {}) {
 
 // Records npm calls; every install changes the lockfile, as npm would.
 // A fake npm changes no versions, so tests that use it skip the post-install version check.
-const skipVerify = (dir, before, plan) => ({ confirmed: plan.actions.map((a) => `${a.name}@${a.target}`), unresolved: [] });
+const skipVerify = (dir, stages) => ({ confirmed: stages.flatMap((s) => s.actions.map((a) => `${a.name}@${a.target}`)), unresolved: [] });
 
 function fakeNpm(app, respond = () => 0) {
   const calls = [];
@@ -188,7 +193,7 @@ test('an install that leaves the old versions in place is rolled back before the
 test('fix runs one install per manifest group plus one for overrides', async (t) => {
   const { app, evidence } = tempProject(t);
   const npm = fakeNpm(app);
-  const r = await applyFixes(app, { lookups: LOOKUPS, evidenceDir: evidence, exec: npm.exec, verifyInstall: skipVerify });
+  const r = await applyFixes(app, { lookups: LOOKUPS, evidenceDir: evidence, exec: npm.exec, allowMajor: true, verifyInstall: skipVerify });
   assert.deepEqual(npm.calls.filter((c) => c.startsWith('install')), [
     'install web-lib@2.0.1 unused-lib@1.0.1 --save-exact --ignore-scripts --save-prod',
     'install test-lib@3.1.0 --save-exact --ignore-scripts --save-dev',
@@ -206,7 +211,7 @@ test('a failed install restores package.json and the lockfile and writes a failu
   const lockBefore = readFileSync(join(app, 'package-lock.json'), 'utf8');
   // The pins succeed; the overrides install fails after package.json has been rewritten.
   const npm = fakeNpm(app, (args) => (args.join(' ') === 'install --ignore-scripts' ? 1 : 0));
-  await assert.rejects(applyFixes(app, { lookups: LOOKUPS, evidenceDir: evidence, exec: npm.exec, verifyInstall: skipVerify }), (err) => {
+  await assert.rejects(applyFixes(app, { lookups: LOOKUPS, evidenceDir: evidence, exec: npm.exec, allowMajor: true, verifyInstall: skipVerify }), (err) => {
     assert.match(err.message, /npm install \(overrides\) failed/);
     assert.match(err.message, /Fix rolled back: package\.json and package-lock\.json were restored/);
     assert.match(err.message, /npm ci/);
@@ -266,7 +271,7 @@ test('tests failing after a successful upgrade keep the changes (no rollback)', 
   const { app, evidence } = tempProject(t, { testScript: true });
   // Baseline passes, the run after the upgrade fails.
   const npm = fakeNpm(app, (args, calls) => (args[0] === 'test' && calls.filter((c) => c === 'test').length === 2 ? 1 : 0));
-  const r = await applyFixes(app, { lookups: LOOKUPS, evidenceDir: evidence, exec: npm.exec, verifyInstall: skipVerify });
+  const r = await applyFixes(app, { lookups: LOOKUPS, evidenceDir: evidence, exec: npm.exec, allowMajor: true, verifyInstall: skipVerify });
   assert.equal(r.testsBefore.passed, true);
   assert.equal(r.tests.passed, false);
   assert.equal(JSON.parse(readFileSync(join(app, 'package-lock.json'), 'utf8')).changedByFakeNpm, true);

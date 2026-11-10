@@ -128,6 +128,7 @@ test('usage errors exit 2 before anything is read or changed', () => {
     [['scan', missing, '--fail-on', '--json'], /--fail-on requires a value/],
     [['scan', missing, '--markdown', '--json'], /--markdown requires a value/],
     [['scan', missing, '--apply'], /scan does not support option/],
+    [['scan', missing, '--allow-major'], /scan does not support option/],
     [['plan', missing, '--min-priority'], /--min-priority requires a value/],
     ...[['--apply'], ['--evidence', '/tmp/x'], ['--no-tests']].map((extra) => [['plan', missing, ...extra], /plan does not support option/]),
     // "--min-priority --dry-run" used to take --dry-run as the priority and apply the upgrades.

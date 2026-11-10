@@ -52,7 +52,7 @@ test('skips build output and test folders only at the top of the project', () =>
 test('treats a workspace root like the project root for test folders', () => {
   const ws = fileURLToPath(new URL('./fixtures/workspaces', import.meta.url));
   const imports = findImports(ws, { workspaces: ['packages/app', 'packages/tools'] });
-  assert.deepEqual(imports.get('test-lib'), { runtime: [], test: ['packages/app/test/app.test.js:2'] });
+  assert.deepEqual(imports.get('test-lib'), { runtime: [], test: ['packages/app/test/app.test.js:2'], config: [] });
   assert.deepEqual(imports.get('express').runtime, ['packages/app/src/index.js:2']);
 });
 
@@ -123,7 +123,7 @@ test('files count by their real location, and files too large to read are report
   symlinkSync('../src', join(dir, '__tests__', 'src'), 'dir'); // walked first, but it is src/
   writeFileSync(join(dir, 'big.js'), `require('hidden');\n/*${'x'.repeat(2_000_000)}*/\n`);
   const imports = findImports(dir);
-  assert.deepEqual(imports.get('vuln'), { runtime: ['src/index.js:1'], test: [] });
+  assert.deepEqual(imports.get('vuln'), { runtime: ['src/index.js:1'], test: [], config: [] });
   assert.deepEqual(imports.skipped, ['big.js']);
 });
 

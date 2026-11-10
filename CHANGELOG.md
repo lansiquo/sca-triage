@@ -7,6 +7,24 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- `plan` and `fix` no longer apply major upgrades by default. They list them under "Major upgrades,
+  not applied without --allow-major"; pass `--allow-major` to apply them. A project's tests were
+  the only guard against a breaking major upgrade, and many projects test too little for that.
+- `fix` installs the direct upgrades first, rescans, and writes npm overrides only for the copies
+  that are still vulnerable. An upgraded dependency often brings safe copies itself, and an
+  override stays in `package.json` for good, so `fix` no longer writes ones that aren't needed. It
+  lists the planned overrides it skipped.
+
+### Fixed
+- Ranking: a production dependency loaded by name, like a view engine Express loads with
+  `app.set('view engine', 'ejs')`, was "not imported", so a critical advisory in it ranked P2 and
+  passed the default gate. A string in runtime code that is exactly the name of a direct
+  production dependency now counts as loaded (level `named`).
+- Ranking: a development-only package that only tool config files load, like `vite` in
+  `vite.config.js`, was "imported" and ranked P1. It is now `config-only`, which doesn't count as
+  loaded. A config file that loads a production package still counts as runtime code.
+
 ## [1.2.4] - 2026-11-10
 
 ### Fixed

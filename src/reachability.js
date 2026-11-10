@@ -22,6 +22,9 @@ const SKIP_AT_ROOT = new Set(['dist', 'build', 'coverage', 'evidence', '.next'])
 // *.test.js / *.spec.js are tests anywhere.
 const TEST_DIRS_AT_ROOT = new Set(['test', 'tests', '__tests__', 'spec']);
 const TEST_FILE = /\.(?:test|spec)\.(?:c|m)?(?:j|t)sx?$/;
+// Tool configuration such as vite.config.js or jest.config.ts. A development-only package
+// that only these files load is build tooling, not something the app runs (see resolveImports).
+const CONFIG_FILE = /\.config\.(?:c|m)?(?:j|t)s$/;
 
 // 'lodash/merge' -> 'lodash', '@scope/pkg/sub' -> '@scope/pkg', './local' -> null
 export function packageNameFromSpecifier(spec) {
@@ -310,7 +313,10 @@ function blank(text, ranges, keep) {
   return out + (keep ? spaces(pos, text.length) : text.slice(pos));
 }
 
-function* specifiers(text, file = '') {
+// Yields { name, line } for each package the text imports, and { name, line, named: true } for
+// each string that is exactly one of `names` (a framework can load a package by name, as
+// Express does with app.set('view engine', 'ejs')).
+function* specifiers(text, file = '', names = new Set()) {
   let code = text;
   const hits = []; // fallback matches: { spec, index }
   if (SFC_EXT.test(file)) {
@@ -329,13 +335,18 @@ function* specifiers(text, file = '') {
     if (ts[j]?.value === 'createRequire' && ts[j + 1]?.value === '(') aliases.add(ts[i].value);
   }
   const nameOf = (t) => t.template ? packageFromTemplate(t.value, t.complete) : packageNameFromSpecifier(t.value);
+  const used = new Set(); // string tokens read as import specifiers
   for (let i = 0; i < ts.length; i++) {
     const t = ts[i];
-    if (t.literal) continue;
+    if (t.literal) {
+      if (!used.has(i) && !t.template && names.has(t.value)) yield { name: t.value, line: t.line, named: true };
+      continue;
+    }
     if (aliases.has(t.value) || t.value === 'import') {
       let j = i + 1;
       if (ts[j]?.value === '.' && ts[j + 1]?.value === 'resolve') j += 2;
       if (ts[j]?.value === '(' && ts[j + 1]?.literal) {
+        used.add(j + 1);
         yield { name: nameOf(ts[j + 1]), line: t.line };
         continue;
       }
@@ -344,6 +355,7 @@ function* specifiers(text, file = '') {
     if (ts[i + 1]?.value === '(' || ts[i + 1]?.value === '.') continue;
     let j = i + 1;
     if (t.value === 'import' && ts[j]?.literal) {
+      used.add(j);
       yield { name: nameOf(ts[j]), line: t.line };
       i = j; continue;
     }
@@ -351,6 +363,7 @@ function* specifiers(text, file = '') {
       const v = ts[j].value;
       if (v === ';' || v === 'import' || v === 'export' || v === '(' || ts[j].literal) break;
       if (v === 'from' && ts[j + 1]?.literal) {
+        used.add(j + 1);
         yield { name: nameOf(ts[j + 1]), line: t.line };
         j += 2; break;
       }
@@ -369,10 +382,11 @@ function* specifiers(text, file = '') {
   }
 }
 
-// Returns Map(packageName -> { runtime: [file:line], test: [file:line] }).
+// Returns Map(packageName -> { runtime: [file:line], test: [file:line], config: [file:line] }).
 // `workspaces` are workspace folders relative to projectDir ("packages/app"); each one's
-// top-level build and test folders are treated like the project root's.
-export function findImports(projectDirArg, { workspaces = [] } = {}) {
+// top-level build and test folders are treated like the project root's. A string that is
+// exactly one of `names` is recorded too, as `named`; resolveImports decides whether it counts.
+export function findImports(projectDirArg, { workspaces = [], names = new Set() } = {}) {
   const projectDir = resolve(projectDirArg);
   const found = new Map();
   found.records = [];
@@ -389,19 +403,19 @@ export function findImports(projectDirArg, { workspaces = [] } = {}) {
   found.skipped = ctx.skipped.map((file) => relative(ctx.realRoot, file).split(sep).join('/'));
   for (const file of files) {
     const rel = relative(ctx.realRoot, file).split(sep).join('/');
-    const kind = isTestPath(rel, workspaceRoots) ? 'test' : 'runtime';
+    const kind = isTestPath(rel, workspaceRoots) ? 'test' : CONFIG_FILE.test(rel) ? 'config' : 'runtime';
     const text = readFileSync(file, 'utf8');
-    for (const { name, line } of specifiers(text, rel)) {
+    for (const { name, line, named } of specifiers(text, rel, names)) {
       if (!name) continue;
-      if (!found.has(name)) found.set(name, { runtime: [], test: [] });
+      if (!found.has(name)) found.set(name, { runtime: [], test: [], config: [] });
       const where = found.get(name)[kind];
       const loc = `${rel}:${line}`;
-      const key = `${name}\0${kind}`;
+      const key = `${name}\0${kind}\0${named ? 'named' : ''}`;
       if (!locations.has(key)) locations.set(key, new Set());
       if (!locations.get(key).has(loc)) {
         locations.get(key).add(loc);
-        where.push(loc);
-        found.records.push({ name, file: rel, kind, loc });
+        if (!named) where.push(loc);
+        found.records.push({ name, file: rel, kind, loc, ...(named ? { named: true } : {}) });
       }
     }
   }
@@ -410,6 +424,10 @@ export function findImports(projectDirArg, { workspaces = [] } = {}) {
 
 // Bind source imports to installed paths before tracing their dependencies. The same
 // name in another workspace must not borrow this source file's evidence.
+//   - A string that names a package counts only for a direct dependency the project declares
+//     for production (not devDependencies): level "named".
+//   - A config file (vite.config.js) loading a development-only package is build tooling:
+//     level "config-only". Loading anything else from a config file counts as runtime code.
 export function resolveImports(project, imports) {
   const reached = new Map();
   const roots = new Map();
@@ -417,18 +435,22 @@ export function resolveImports(project, imports) {
     const dirname = posix.dirname(record.file);
     const root = project.resolveDependency(dirname === '.' ? '' : dirname, record.name);
     if (!root) continue;
-    const key = `${root.path}\0${record.kind}`;
-    if (!roots.has(key)) roots.set(key, { root, kind: record.kind, evidence: new Set() });
+    if (record.named && !root.declaredBy?.some((d) => d.kind !== 'dev')) continue;
+    let kind = record.kind;
+    if (kind === 'config' && !root.dev) kind = 'runtime';
+    const key = `${root.path}\0${kind}\0${record.named ? 'named' : ''}`;
+    if (!roots.has(key)) roots.set(key, { root, kind, named: Boolean(record.named), evidence: new Set() });
     roots.get(key).evidence.add(record.loc);
   }
-  for (const { root, kind, evidence } of roots.values()) {
+  for (const { root, kind, named, evidence } of roots.values()) {
     const rootEvidence = [...evidence];
     const stack = [root], seen = new Set();
     while (stack.length) {
       const node = stack.pop();
       if (seen.has(node.path)) continue;
       seen.add(node.path);
-      const level = kind === 'test' ? 'test-only' : node === root ? 'imported' : 'via-imported';
+      const level = kind === 'test' ? 'test-only' : kind === 'config' ? 'config-only'
+        : node !== root ? 'via-imported' : named ? 'named' : 'imported';
       const previous = reached.get(node.path);
       if (!previous || REACHABILITY_RANK[level] >= REACHABILITY_RANK[previous.level]) {
         const locations = node === root ? rootEvidence : [`via ${root.name} (${rootEvidence[0]})`];
@@ -444,4 +466,5 @@ export function classify(install, imports) {
   return imports.get(install.path) || { level: 'not-imported', evidence: [] };
 }
 
-export const REACHABILITY_RANK = { 'not-imported': 0, 'test-only': 1, 'via-imported': 2, imported: 3 };
+// "named" ranks with "via-imported": both count as loaded, on weaker evidence than an import.
+export const REACHABILITY_RANK = { 'not-imported': 0, 'config-only': 1, 'test-only': 1, 'via-imported': 2, named: 2, imported: 3 };

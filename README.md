@@ -92,8 +92,8 @@ run `npm install -g sca-triage` and drop the `npx`. To run it from a clone, use
 
 ```text
 sca-triage scan [dir] [--json] [--markdown <file>] [--fail-on P1|P2|P3|none]
-sca-triage plan [dir] [--min-priority P1|P2|P3]
-sca-triage fix  [dir] [--min-priority P1|P2|P3] [--evidence <dir>] [--no-tests]
+sca-triage plan [dir] [--min-priority P1|P2|P3] [--allow-major]
+sca-triage fix  [dir] [--min-priority P1|P2|P3] [--allow-major] [--evidence <dir>] [--no-tests]
 sca-triage --version
 ```
 
@@ -124,10 +124,18 @@ or a full commit SHA for the strictest supply-chain safety.
 | **P2** | High or critical but not loaded at runtime, or moderate and loaded | Schedule it |
 | **P3** | Everything else | Batch with routine upgrades |
 
-Each finding gets a reachability level: `imported` (your runtime code requires or imports it),
-`via-imported` (an imported dependency pulls it in), `test-only` or `not-imported`. The check
-covers `require`, `import`, dynamic `import()` and `createRequire()` across JS, TS, JSX/TSX, Vue,
-Svelte and Astro sources, and follows workspaces and aliased packages.
+Each finding gets a reachability level:
+
+- `imported`: your runtime code requires or imports it.
+- `named`: your runtime code names a production dependency in a string, as Express does to load a
+  view engine (`app.set('view engine', 'ejs')`). Counts as loaded.
+- `via-imported`: an imported or named dependency pulls it in.
+- `config-only`: a development-only package loaded only by tool config files such as
+  `vite.config.js`. Doesn't count as loaded.
+- `test-only` or `not-imported`.
+
+The check covers `require`, `import`, dynamic `import()` and `createRequire()` across JS, TS,
+JSX/TSX, Vue, Svelte and Astro sources, and follows workspaces and aliased packages.
 
 ## Fix your own project
 
@@ -147,6 +155,8 @@ and after upgrading, so use it only on projects whose tests you trust.
    ```
 
    - `--min-priority P1` fixes only P1 findings. By default every priority is fixed.
+   - `--allow-major` also applies major upgrades. Without it, `plan` and `fix` list them for you
+     to review first.
    - `--no-tests` skips the tests; the upgrades are then marked **unverified**. A project with no
      `test` script gets the same.
    - `--evidence <dir>` saves the evidence elsewhere (default `<project>/evidence/<timestamp>`).
@@ -176,14 +186,17 @@ so you can see what broke, and it exits with code 1.
 2. Pins each vulnerable direct dependency to its safe version with
    `npm install name@version --save-exact`, preserving production, development, optional and peer
    declarations. Multiple declarations are updated in place, retaining peer metadata and aliases.
-3. Fixes vulnerable packages that your dependencies pull in with npm `overrides` in `package.json`,
-   scoped to the packages that require them. A package that requires a version the pin excludes
+3. Rescans, then fixes the vulnerable packages your dependencies still pull in with npm
+   `overrides` in `package.json`, scoped to the packages that require them. An upgraded dependency
+   often brings safe copies itself, and an override stays in `package.json` until you remove it,
+   so `fix` only writes the ones still needed. A package that requires a version the pin excludes
    gets an override too, and existing overrides are kept. Old nested copies the overrides cover are
    removed from `package-lock.json` first, so npm installs the new version instead of keeping the
    old one.
 4. Installs with `--ignore-scripts`, so no install scripts run.
-5. Checks the new `package-lock.json`: every package that used a vulnerable copy must now get the
-   safe version. If npm installed anything else, everything is rolled back and the tests don't run.
+5. Checks the new `package-lock.json`: every manifest that declared a pinned package, and every
+   package that used a copy an override targets, must now get the safe version. If npm installed
+   anything else, everything is rolled back and the tests don't run.
 6. Runs `npm test` again and rescans. If the tests also failed in the baseline run, the output says
    so, since the failure may not be caused by the upgrade.
 7. Records the baseline scan and original manifests/lockfile before mutation. The evidence folder
@@ -215,8 +228,10 @@ per round, up to 5 rounds), and the pick is repeated until the target is clean. 
 still unconfirmed after 5 rounds is displayed with a warning and excluded from automatic fixes. If a lookup fails, the command
 stops with exit code 2.
 
-It prefers a fix on the same release line. A major upgrade is applied only when no same-major fix
-exists, and it is flagged in the plan and the report.
+It prefers a fix on the same release line. A major upgrade is chosen only when no same-major fix
+exists; `plan` and `fix` list it, and `fix` applies it only with `--allow-major`. Overrides pin
+exact versions, the ones the tool checked; a later scan flags any new advisory, and `fix` raises
+the override.
 
 ## Exit codes
 
@@ -236,7 +251,8 @@ exists, and it is flagged in the plan and the report.
   outside the project.
 - **Import-level reachability.** "Imported" means your code loads the package, not that the
   vulnerable function runs. Imports resolve from their source file to the matching installed copy, then follow its
-  dependency graph. Reachability only lowers priority; it never hides a finding.
+  dependency graph. A package loaded by a name built at runtime, or named only in a config file
+  that isn't JavaScript, isn't seen. Reachability only lowers priority; it never hides a finding.
 - **Tests are the safety net.** An upgrade is only as verified as the project's test suite.
   `fix` runs that suite, and npm reads the project's `.npmrc`, so use `fix` on projects you trust.
   It ignores install scripts and always uses the system `git`.
