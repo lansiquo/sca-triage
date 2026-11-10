@@ -12,7 +12,15 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 - README: the "Fix your own project" steps still ran the tool from a clone
   (`node sca-triage/bin/sca-triage.js`). They now use `npx sca-triage`, like the rest of the README.
-  No code changes.
+- ARCHITECTURE.md: the diagram, component table and evidence list now include the install check,
+  manual upgrades, the stricter lockfile checks and the snapshot and command files.
+- CHANGELOG.md: the version links at the bottom include 1.2.3 and 1.2.4.
+
+No code changes.
+
+### Added
+- The packed-package check in CI also checks the docs: README commands use `npx`, pinned versions
+  match `package.json`, the usage block matches `--help`, and the changelog has this version.
 
 ## [1.2.3] - 2026-11-10
 
@@ -162,7 +170,9 @@ fixed release) instead of 3.
 - GitHub Action (`lansiquo/sca-triage@v1`).
 - A lab app with known-vulnerable dependencies (`lab/`) to try it on (removed in 1.2.1).
 
-[Unreleased]: https://github.com/lansiquo/sca-triage/compare/v1.2.2...HEAD
+[Unreleased]: https://github.com/lansiquo/sca-triage/compare/v1.2.4...HEAD
+[1.2.4]: https://github.com/lansiquo/sca-triage/compare/v1.2.3...v1.2.4
+[1.2.3]: https://github.com/lansiquo/sca-triage/compare/v1.2.2...v1.2.3
 [1.2.2]: https://github.com/lansiquo/sca-triage/compare/v1.2.1...v1.2.2
 [1.2.1]: https://github.com/lansiquo/sca-triage/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/lansiquo/sca-triage/compare/v1.1.0...v1.2.0

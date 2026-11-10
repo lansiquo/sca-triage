@@ -14,30 +14,32 @@ flowchart TD
     RANK --> GATE{"scan: a finding at or<br/>above --fail-on?"}
     GATE -- yes --> E1["exit 1"]
     GATE -- no --> E0["exit 0"]
-    RANK --> PLAN["plan: pins for direct dependencies,<br/>npm overrides for the rest"]
+    RANK --> PLAN["plan: pins for direct dependencies,<br/>npm overrides for the rest,<br/>a manual list for what neither can do safely"]
     PLAN --> FIX
     subgraph FIX["fix (src/fix.js)"]
         T0["npm test: baseline"] --> PIN["npm install name@target --save-exact<br/>one per manifest and dependency type"]
         PIN --> OV["Write overrides, drop stale nested<br/>lock entries, npm install"]
-        OV --> T1["npm test again"]
+        OV --> CHK["Check the new lockfile:<br/>every planned copy at its target"]
+        CHK --> T1["npm test again"]
         T1 --> RE["Rescan"]
-        RE --> EV["Evidence: REPORT.md, before/after JSON,<br/>both lockfiles, test logs, CycloneDX SBOM"]
+        RE --> EV["Evidence: REPORT.md, before/after JSON and snapshots,<br/>npm commands, test logs, CycloneDX SBOM"]
     end
     PIN -. "install fails" .-> RB["Restore manifests and lockfile<br/>record the failure, exit 2"]
     OV -. "install fails" .-> RB
+    CHK -. "anything else installed" .-> RB
 ```
 
 ## Components
 
 | File | Responsibility |
 |---|---|
-| `bin/sca-triage.js` | CLI: parses `scan`, `plan` and `fix` and their options, rejects an unknown option or a second directory (exit 2), prints results and maps them to exit codes. |
-| `src/lockfile.js` | Reads `package.json` and `package-lock.json` (v1 is rejected). Lists every installed copy with its path, version, alias, owning workspace, dev and optional flags and the package that bundles it, if any; which packages require it and with what spec; and which direct dependencies lead to it. |
+| `bin/sca-triage.js` | CLI: parses `scan`, `plan` and `fix` and their options, rejects an unknown option, an option missing its value or a second directory (exit 2) before anything is read, prints results and maps them to exit codes. |
+| `src/lockfile.js` | Reads `package.json` and `package-lock.json`. Rejects v1, a malformed lockfile, one missing a required dependency, and a registry entry whose name or version doesn't match its tarball. Lists every installed copy with its path, version, alias, owning workspace or local package, dev and optional flags and the package that bundles it, if any; which packages require it and with what spec; and which direct dependencies lead to it. |
 | `src/advisories.js` | Registry client: the bulk advisory endpoint (`/-/npm/v1/security/advisories/bulk`) and abbreviated package metadata for published versions. Each request has a 30 s timeout; network errors, timeouts, 429 and 5xx get up to 3 attempts, honouring `Retry-After` (capped at 10 s). Validates `SCA_TRIAGE_REGISTRY` and rejects malformed responses. |
-| `src/reachability.js` | Finds which packages the project's own code loads: `require()`, `import`, `export … from`, dynamic `import()` and `createRequire()` in JavaScript, TypeScript, JSX/TSX, Vue, Svelte and Astro files and extensionless Node scripts. Separates runtime from test code. |
+| `src/reachability.js` | Finds which packages the project's own code loads: `require()`, `import`, `export … from`, dynamic `import()` and `createRequire()` in JavaScript, TypeScript, JSX/TSX, Vue, Svelte and Astro files and extensionless Node scripts. Separates runtime from test code, and ties each import to the installed copy it loads. |
 | `src/semver.js` | Version parsing and comparison, advisory ranges (`satisfies`) and npm dependency specs such as `^`, `~` and x-ranges (`acceptsVersion`). |
 | `src/triage.js` | Turns the inventory, advisories and import evidence into findings: reachability level, P1–P3 and the smallest safe target for each copy. |
-| `src/fix.js` | `plan` and `fix`: plans pins and overrides, runs npm, tests, rescans, writes the evidence folder and rolls back a failed install. |
+| `src/fix.js` | `plan` and `fix`: plans pins and overrides, lists the upgrades that need a manual change, runs npm, checks the installed versions, runs the tests, rescans, writes the evidence folder and rolls back a failed install. |
 | `src/report.js` | Console output, the Markdown findings table and `REPORT.md`; escapes untrusted names and paths. |
 | `action.yml` | Composite GitHub Action: runs `scan` with `--fail-on` (default `P1`) and adds the Markdown table to the job summary. |
 
@@ -49,13 +51,13 @@ flowchart TD
 | Network | npm registry | npm registry | npm registry and npm installs |
 | Writes | Only `--markdown <file>` | Nothing | `package.json` files, `package-lock.json`, `node_modules`, evidence folder |
 | Runs project code | No | No | `npm test` before and after, unless `--no-tests` or there is no `test` script. npm reads the project's `.npmrc`; install scripts are off and `git` is always the system one |
-| Exit codes | 0 below `--fail-on`, 1 at or above, 2 error | 0, or 2 on error | 0 tests pass or unverified, 1 tests fail after the upgrade, 2 error or failed install |
+| Exit codes | 0 below `--fail-on`, 1 at or above, 2 error | 0, or 2 on error | 0 tests pass or unverified, 1 tests fail after the upgrade, 2 error, failed install or install check (rolled back), or failed rescan |
 
 The GitHub Action runs `scan` only.
 
 ## Ranking
 
-Each copy gets a reachability level: `imported` (runtime code requires the copy it resolves to), `via-imported` (an imported direct dependency leads to it), `test-only` or `not-imported`. Priority combines that with the highest advisory severity:
+Each copy gets a reachability level: `imported` (runtime code requires the copy it resolves to), `via-imported` (a package the runtime code imports leads to it), `test-only` or `not-imported`. Priority combines that with the highest advisory severity:
 
 | | Imported or via an imported dependency | Test-only or not imported |
 |---|---|---|
@@ -103,7 +105,7 @@ The JSON inventory includes the installed nodes and dependency paths used to che
 - Source scanning: files under 2 MB (larger ones are named in a warning), `node_modules` and `.git` skipped everywhere and build output folders at the project root, symlinks followed only inside the project with each file read once and classified by its real path, and a linear tokenizer with set-based evidence deduplication. The tokenizer skips comments, strings and regular expressions. In `.vue`, `.svelte` and `.astro` files it reads only the script blocks. Text it can't read reliably (a line with an unpaired quote, or everything after an unclosed comment or template literal) is searched with bounded patterns instead, which count more than they should rather than less.
 - Lockfile: each registry entry's name and version must match its tarball URL, so an edited entry can't make the scan check a different package than npm installs. A git, file or URL dependency can't be checked that way; one with no version is skipped with a warning.
 - Output: untrusted names and paths are escaped in Markdown, and terminal control characters are replaced in console output.
-- Evidence: `REPORT.md`, `before.json` and `after.json`, both lockfiles, both test logs and a CycloneDX SBOM from `npm sbom`.
+- Evidence: `REPORT.md`, `before.json` and `after.json`, `before/` and `after/` snapshots of the manifests and lockfile, `commands.txt` (every npm command and its output), both test logs and a CycloneDX SBOM from `npm sbom`. The baseline is written before anything changes.
 
 ## Out of scope
 
@@ -113,7 +115,7 @@ The JSON inventory includes the installed nodes and dependency paths used to che
 - Vulnerabilities missing from the GitHub Advisory Database; results reflect the database at scan time, and zero findings is not a certification.
 - Source-code flaws (see [sast-triage](https://github.com/lansiquo/sast-triage)), secrets and infrastructure code.
 
-## Audit hardening
+## Evidence and output handling
 
 Baseline evidence is persisted before mutation. npm stdout and stderr are captured to separate
 temporary files, avoiding pipe-buffer termination and keeping SBOM JSON valid. Installs are checked
