@@ -7,6 +7,9 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- README: the introduction says the tool is published on npm and shows the one-line command.
+
 ## [1.2.4] - 2026-11-10
 
 ### Fixed

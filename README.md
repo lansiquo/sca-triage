@@ -5,6 +5,13 @@ It finds known vulnerabilities in the tree locked in `package-lock.json`, ranks 
 and by whether your code loads the vulnerable package, applies the smallest safe upgrades, and
 checks them with your project's own tests.
 
+It is published on npm as [`sca-triage`](https://www.npmjs.com/package/sca-triage). To scan a
+project, run this in its folder:
+
+```bash
+npx sca-triage scan .
+```
+
 `npm audit` reports every advisory with the same urgency. `sca-triage` uses the same advisory data
 (the GitHub Advisory Database, via the npm registry) and adds the triage: what to fix now, what to
 schedule, and evidence that the fix didn't break anything. Its SAST companion,
