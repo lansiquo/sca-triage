@@ -14,6 +14,12 @@ test('--help prints help and exits 0, with or without a command', () => {
   }
 });
 
+test('--version prints the package version', () => {
+  const r = run('--version');
+  assert.equal(r.status, 0);
+  assert.equal(r.stdout.trim(), JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version);
+});
+
 test('no command prints help and exits 2 (usage error)', () => {
   const r = run();
   assert.equal(r.status, 2);

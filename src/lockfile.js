@@ -74,6 +74,20 @@ function safePath(path) {
 }
 const outside = (path) => path === '..' || path.startsWith('../');
 
+// Whether a folder is one of the project's npm workspaces ("packages/*", "apps/**", "!x").
+// A local folder that isn't (a "file:./lib" dependency) can't be installed into with
+// `npm install --workspace`.
+function workspaceMatcher(pkg, lockRoot) {
+  const declared = pkg.workspaces ?? lockRoot?.workspaces;
+  const patterns = (Array.isArray(declared) ? declared : Array.isArray(declared?.packages) ? declared.packages : [])
+    .filter((x) => typeof x === 'string');
+  const toRegExp = (glob) => new RegExp(`^${glob.replace(/^\.\//, '').replace(/\/+$/, '').split('**').map((part) =>
+    part.split('*').map((text) => text.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('[^/]*')).join('.*')}$`);
+  const include = patterns.filter((x) => !x.startsWith('!')).map(toRegExp);
+  const exclude = patterns.filter((x) => x.startsWith('!')).map((x) => toRegExp(x.slice(1)));
+  return (path) => include.some((re) => re.test(path)) && !exclude.some((re) => re.test(path));
+}
+
 // A registry tarball URL names the package and version inside it (".../@s/x/-/x-1.2.3.tgz").
 // An entry that claims another name or version would make the scan check the wrong package
 // while npm installs the tarball.
@@ -131,6 +145,8 @@ export function loadProject(dir) {
   const manifests = new Map([['', declaredDeps(pkg)]]); // owner path -> declared deps
   const manifestData = new Map([['', pkg]]);
   const workspaces = [];
+  const localPackages = new Set(); // folders inside the project that are not workspaces
+  const isWorkspace = workspaceMatcher(pkg, lock.packages['']);
   for (const [path, entry] of Object.entries(lock.packages)) {
     if (!path || path.includes('node_modules/') || !entry || typeof entry !== 'object') continue;
     // A file: dependency outside the project: its lockfile entry describes it, and it is not
@@ -140,6 +156,7 @@ export function loadProject(dir) {
       continue;
     }
     workspaces.push(path);
+    if (!isWorkspace(path)) localPackages.add(path);
     const file = join(dir, path, 'package.json');
     if (!existsSync(file)) throw new Error(`missing local package manifest ${path}/package.json`);
     const manifest = readJson(file);
@@ -191,6 +208,14 @@ export function loadProject(dir) {
     byPath.set(path, { path, name: manifest.name || path, version: manifest.version,
       dependsOn: [...declaredDeps(manifest).keys()], requires: {}, requiredBy: [], requiredSpecs: [], requiredEdges: [], declaredBy: [], dependencyPaths: [] });
   }
+  // So do installed entries with no version: they aren't scanned, but what they depend on
+  // is still reached through them.
+  for (const path of unversioned) {
+    const name = nameFromPath(path);
+    byPath.set(path, { path, name, realName: name, version: undefined,
+      dependsOn: [...new Set(DEP_FIELDS.flatMap((f) => ownKeys(lock.packages[path][f])))],
+      requires: {}, requiredBy: [], requiredSpecs: [], requiredEdges: [], declaredBy: [], dependencyPaths: [] });
+  }
   const links = new Map(Object.entries(lock.packages).filter(([, e]) => e.link).map(([path, e]) => [path, e.resolved]));
 
   // Resolve from an importing directory, including ordinary source subdirectories.
@@ -212,20 +237,11 @@ export function loadProject(dir) {
   // legacy-peer-deps. A file: dependency outside the project gets no installs of its own.
   const missingAllowed = (entry, name) => Object.hasOwn(entry.optionalDependencies || {}, name)
     || Object.hasOwn(entry.peerDependencies || {}, name);
-  // Whether a dependency resolves to an entry that is locked but not scanned (no version).
-  const lockedUnscanned = (fromPath, name) => {
-    for (let base = fromPath; ;) {
-      if (unversioned.has(`${base ? base + '/' : ''}node_modules/${name}`)) return true;
-      const i = base.lastIndexOf('/node_modules/');
-      if (!base) return false;
-      base = i === -1 ? '' : base.slice(0, i);
-    }
-  };
   for (const [path, item] of byPath) {
     const entry = manifestData.get(path) || lock.packages[path];
     for (const name of item.dependsOn) {
       const next = resolve(path, name);
-      if (!next && !outside(path) && !missingAllowed(entry, name) && !lockedUnscanned(path, name)) {
+      if (!next && !outside(path) && !missingAllowed(entry, name)) {
         throw new Error(`incomplete lockfile: ${path || '(root)'} requires missing dependency ${name}`);
       }
       if (next) item.dependencyPaths.push(next.path);
@@ -272,13 +288,13 @@ export function loadProject(dir) {
       const hit = resolve(owner, name);
       const manifest = manifestData.get(owner);
       if (!hit) {
-        if (!missingAllowed(manifest, name) && !lockedUnscanned(owner, name)) throw new Error(`incomplete lockfile: ${owner || '(root)'} requires missing dependency ${name}`);
+        if (!missingAllowed(manifest, name)) throw new Error(`incomplete lockfile: ${owner || '(root)'} requires missing dependency ${name}`);
         continue;
       }
       for (const [field, declaredKind] of MANIFEST_FIELDS) {
         if (!Object.hasOwn(manifest[field] || {}, name)) continue;
         if (declaredKind === 'prod' && kind === 'optional') continue;
-        hit.declaredBy.push({ owner, kind: declaredKind });
+        hit.declaredBy.push({ owner, kind: declaredKind, ...(localPackages.has(owner) ? { local: true } : {}) });
       }
       roots.push(hit);
     }

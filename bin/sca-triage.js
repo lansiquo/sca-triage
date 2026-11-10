@@ -3,7 +3,7 @@
 // then apply the smallest safe upgrades and prove them with your tests.
 
 import { resolve, join } from 'node:path';
-import { writeFileSync, existsSync, lstatSync } from 'node:fs';
+import { writeFileSync, readFileSync, existsSync, lstatSync, mkdirSync } from 'node:fs';
 import { triage, gateFails } from '../src/triage.js';
 import { planFixes, applyFixes, pinCommands } from '../src/fix.js';
 import { formatTable, formatMarkdown, formatTestsLine, displayName, plain, lineStart, formatBundled, formatManual } from '../src/report.js';
@@ -12,6 +12,7 @@ const HELP = `Usage:
   sca-triage scan [dir] [--json] [--markdown <file>] [--fail-on P1|P2|P3|none]
   sca-triage plan [dir] [--min-priority P1|P2|P3]
   sca-triage fix  [dir] [--min-priority P1|P2|P3] [--evidence <dir>] [--no-tests]
+  sca-triage --version
 
 scan   Find known vulnerabilities in the dependency tree locked in
        package-lock.json (v2/v3), ranked by severity and whether your code loads
@@ -39,7 +40,7 @@ function parseArgs(argv) {
   const opts = { _: [] };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a === '--json' || a === '--help' || a === '-h') opts[a.replace(/^-+/, '')] = true;
+    if (a === '--json' || a === '--help' || a === '-h' || a === '--version') opts[a.replace(/^-+/, '')] = true;
     else if (a === '--apply') opts.apply = true; // accepted for compatibility: fix always applies
     else if (a === '--dry-run') opts.dryRun = true;
     else if (a === '--no-tests') opts.noTests = true;
@@ -59,6 +60,10 @@ const VALID = new Set(['P1', 'P2', 'P3', 'none']);
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
   const [command, dirArg] = opts._;
+  if (opts.version) {
+    process.stdout.write(`${JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version}\n`);
+    return 0;
+  }
   if (opts.help || opts.h || !command) {
     process.stdout.write(HELP);
     return opts.help || opts.h ? 0 : 2; // asking for help succeeds; a missing command is a usage error
@@ -126,6 +131,11 @@ async function main() {
       throw new Error(`${join(dir, 'evidence')} is a symbolic link; pass --evidence <dir> to choose where the report goes`);
     }
     const evidenceDir = opts.evidence ? resolve(opts.evidence) : join(dir, 'evidence', new Date().toISOString().replace(/[:.]/g, '-'));
+    if (!opts.evidence && !existsSync(join(dir, 'evidence', '.gitignore'))) {
+      // The default folder is inside the project: keep reports and test logs out of its commits.
+      mkdirSync(join(dir, 'evidence'), { recursive: true });
+      writeFileSync(join(dir, 'evidence', '.gitignore'), '*\n');
+    }
     const r = await applyFixes(dir, { minPriority, evidenceDir, runTests: !opts.noTests });
     process.stdout.write(`Verified ${r.verification.confirmed.length} of ${r.plan.actions.length} upgrade target(s):\n${r.changes.map((c) => `  ${plain(c)}`).join('\n')}\n`);
     for (const line of [...formatManual(r.plan.manual), ...formatBundled(r.plan.bundled)]) process.stdout.write(line + '\n');

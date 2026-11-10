@@ -64,7 +64,7 @@ export function formatBundled(findings) {
 export function formatManual(manual = []) {
   if (!manual.length) return [];
   return [
-    'Needs a manual upgrade (an npm override would change more than these copies):',
+    'Needs a manual upgrade (fix can\'t change only these copies):',
     ...manual.map(({ action: a, reason }) => `  ${plain(displayName({ package: a.package, installedAs: a.name }))} ${plain([...new Set(a.from)].join(', '))} -> ${a.target}: ${plain(reason)}`),
   ];
 }
@@ -153,7 +153,7 @@ export function formatMarkdown(before, after, extras = {}) {
     out.push('', '## Changes applied', '', ...extras.changes.map((c) => `- ${codeSpan(c)}`));
   }
   if (extras.manual?.length) {
-    out.push('', '## Needs a manual upgrade', '', 'An npm override would change more than these copies, so `fix` left them as they are:', '',
+    out.push('', '## Needs a manual upgrade', '', '`fix` can\'t change only these copies, so it left them as they are:', '',
       ...extras.manual.map(({ action: a, reason }) => `- ${codeSpan(`${displayName({ package: a.package, installedAs: a.name })}@${[...new Set(a.from)].join(', ')}`)} -> ${escapeMarkdown(a.target)}: ${escapeMarkdown(reason)}`));
   }
   if (extras.verificationError) {

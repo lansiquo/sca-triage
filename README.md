@@ -94,6 +94,7 @@ run `npm install -g sca-triage` and drop the `npx`. To run it from a clone, use
 sca-triage scan [dir] [--json] [--markdown <file>] [--fail-on P1|P2|P3|none]
 sca-triage plan [dir] [--min-priority P1|P2|P3]
 sca-triage fix  [dir] [--min-priority P1|P2|P3] [--evidence <dir>] [--no-tests]
+sca-triage --version
 ```
 
 `--json` prints the full result; `--markdown <file>` also writes the findings table as Markdown.
@@ -194,7 +195,12 @@ Some upgrades are left for you. An npm override applies to every version of the 
 scoped to and to everything below it, so `fix` doesn't write one that would also change other
 copies (an already-safe copy on another major version, say) or that would need two versions under
 one key. `plan` and `fix` list those as **Needs a manual upgrade**, with the reason, and apply the
-rest. Copies bundled inside another package are listed under the package to upgrade.
+rest. The same goes for a dependency declared by a local `file:` package that isn't a workspace:
+npm can't install into it, so you change the version there. Copies bundled inside another package
+are listed under the package to upgrade.
+
+Without `--evidence`, the evidence goes to `evidence/<timestamp>/` in the project, with a
+`.gitignore` so reports and test logs stay out of your commits.
 
 If the final rescan fails (the registry is down, say), `fix` exits 2 and keeps the tested changes,
 with the evidence and snapshots needed to review or undo them. Normal test failures exit 1.

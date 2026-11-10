@@ -28,7 +28,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   entry whose name or version doesn't match its registry tarball, or an advisory with a missing or
   unknown severity is now an error (exit 2) instead of a quieter scan. Lockfiles written with
   `--legacy-peer-deps` and `file:` folders outside the project still load. A git, file or URL
-  dependency with no version in the lockfile is skipped with a warning.
+  dependency with no version in the lockfile is skipped with a warning, and imports through it
+  still count for what it depends on.
 - **Pre-release versions.** Advisory ranges are matched the way `npm audit` matches them, so a
   pre-release such as `1.0.0-alpha.4` is inside `>0 <=5.10.9`.
 - **Option values.** `fix --min-priority --dry-run`, with the value missing, took `--dry-run` as the
@@ -42,6 +43,9 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and two versions of a parent that needed different targets let the last one win. `fix` now
   writes an override only when it reaches nothing else, lists the other upgrades as "needs a manual
   upgrade" with the reason, and applies the rest. Existing nested overrides are kept.
+- **Local packages.** A dependency declared by a local `file:` package that isn't a workspace made
+  `fix` run `npm install --workspace`, which failed and rolled back every upgrade. It is now
+  listed as a manual upgrade and the others are applied.
 - **Install check.** After installing, `fix` checks that every package that used a planned copy now
   gets the safe version, before the tests run. If npm installed anything else, everything is
   rolled back.
@@ -58,6 +62,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 - Published to npm: run it with `npx sca-triage` or install it with `npm install -g sca-triage`.
   The README uses `npx` in its examples.
+- `sca-triage --version`. The default `evidence/` folder gets a `.gitignore`.
 - MIT license, and package metadata for the npm page: author, repository, homepage and issue
   tracker. ARCHITECTURE.md, CHANGELOG.md and SECURITY.md are in the package.
 - Regression tests for each fix, tests that run `fix` with real npm against a local registry, a

@@ -122,6 +122,8 @@ export function planFixes(result, { minPriority = 'P3' } = {}) {
         if (f.direct) {
           action.direct = true;
           for (const d of f.declaredBy || [{ owner: '', kind: f.devOnly ? 'dev' : 'prod' }]) {
+            // npm can't install into a local "file:" folder that isn't a workspace.
+            if (d.local) action.unscoped = `it is declared in ${d.owner}/package.json, a local package that is not a workspace: change the version there`;
             let pin = action.pins.find((p) => p.owner === d.owner);
             if (!pin) { pin = { owner: d.owner, kinds: [], dev: true }; action.pins.push(pin); }
             if (!pin.kinds.includes(d.kind)) pin.kinds.push(d.kind);
@@ -202,7 +204,7 @@ function coverageProblem(action, inventory) {
       if (item.name === action.name && !item.bundledIn && !action.paths.includes(item.path)
         && (item.realName !== action.package || releaseLine(item.version) !== releaseLine(action.target) || compare(item.version, action.target) > 0)) {
         const key = override.scope === null ? `"${action.name}"` : `"${override.scope}" > "${action.name}"`;
-        return `the override ${key} would also change ${item.realName}@${item.version} at ${item.path}`;
+        return `the override ${key} would also change ${item.realName || item.name}${item.version ? `@${item.version}` : ''} at ${item.path}`;
       }
       for (const path of item.dependencyPaths || []) if (nodes.has(path)) queue.push(nodes.get(path));
     }

@@ -125,6 +125,33 @@ test('valid lockfiles that look unusual still load: empty specs, build metadata,
   assert.throws(() => loadProject(project(t, { dependencies: { x: '1.0.0' } }, { 'node_modules/x': { resolved: tgz('x-1.0.0') } })), /invalid or missing version/);
 });
 
+test('a local file: package that is not a workspace gets a manual upgrade, not `npm install --workspace`', async (t) => {
+  // "lib" declares x; "packages/ws" is a real workspace and declares it too.
+  const dir = project(t, { workspaces: ['packages/*'], dependencies: { lib: 'file:./lib' } }, {
+    lib: { version: '1.0.0', dependencies: { x: '1.0.0' } }, 'node_modules/lib': { resolved: 'lib', link: true },
+    'packages/ws': { version: '1.0.0', dependencies: { x: '1.0.0' } }, 'node_modules/ws': { resolved: 'packages/ws', link: true },
+    'node_modules/x': { version: '1.0.0' },
+  });
+  json(join(dir, 'lib/package.json'), { name: 'lib', version: '1.0.0', dependencies: { x: '1.0.0' } });
+  json(join(dir, 'packages/ws/package.json'), { name: 'ws', version: '1.0.0', dependencies: { x: '1.0.0' } });
+  const x = loadProject(dir).installs.find((i) => i.name === 'x');
+  assert.deepEqual(x.declaredBy, [{ owner: 'lib', kind: 'prod', local: true }, { owner: 'packages/ws', kind: 'prod' }]);
+  const plan = planFixes(await triage(dir, lookups));
+  assert.deepEqual(plan.actions, []);
+  assert.match(plan.manual[0].reason, /declared in lib\/package\.json, a local package that is not a workspace/);
+});
+
+test('imports through a dependency with no version still reach what it depends on', async (t) => {
+  const dir = project(t, { dependencies: { g: 'github:o/r' } }, {
+    'node_modules/g': { resolved: 'git+ssh://git@github.com/o/r.git#0123456789abcdef0123456789abcdef01234567', dependencies: { x: '1.0.0' } },
+    'node_modules/x': { version: '1.0.0' },
+  });
+  writeFileSync(join(dir, 'index.js'), "require('g');\n");
+  const result = await triage(dir, lookups);
+  assert.deepEqual(result.findings.map((f) => [f.package, f.reachability, f.priority]), [['x', 'via-imported', 'P1']]);
+  assert.match(result.warnings[0], /node_modules\/g has no version/);
+});
+
 test('an entry whose name or version is not what its registry tarball contains is rejected', (t) => {
   const tgz = 'https://registry.npmjs.org/x/-/x-1.0.0.tgz';
   for (const entry of [{ version: '1.0.1', resolved: tgz }, { name: 'not-x', version: '1.0.0', resolved: tgz }]) {
