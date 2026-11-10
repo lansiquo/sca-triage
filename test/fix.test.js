@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { cpSync, mkdtempSync, readFileSync, writeFileSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { planFixes, applyOverrides, applyFixes, pinCommands } from '../src/fix.js';
+import { planFixes, applyOverrides, applyFixes, pinCommands, targetLabel } from '../src/fix.js';
 import { triage } from '../src/triage.js';
 
 const fixture = (name) => fileURLToPath(new URL(`./fixtures/${name}`, import.meta.url));
@@ -164,7 +164,7 @@ function tempProject(t, { testScript = false } = {}) {
 
 // Records npm calls; every install changes the lockfile, as npm would.
 // A fake npm changes no versions, so tests that use it skip the post-install version check.
-const skipVerify = (dir, stages) => ({ confirmed: stages.flatMap((s) => s.actions.map((a) => `${a.name}@${a.target}`)), unresolved: [] });
+const skipVerify = (dir, stages) => ({ confirmed: stages.flatMap((s) => s.actions.map(targetLabel)), unresolved: [] });
 
 function fakeNpm(app, respond = () => 0) {
   const calls = [];

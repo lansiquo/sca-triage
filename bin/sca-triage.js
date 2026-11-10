@@ -5,7 +5,7 @@
 import { resolve, join } from 'node:path';
 import { writeFileSync, readFileSync, existsSync, lstatSync, mkdirSync } from 'node:fs';
 import { triage, gateFails } from '../src/triage.js';
-import { planFixes, applyFixes, pinCommands } from '../src/fix.js';
+import { planFixes, applyFixes, pinCommands, targetLabel } from '../src/fix.js';
 import { formatTable, formatMarkdown, formatTestsLine, displayName, plain, lineStart, formatBundled, formatManual, formatMajor } from '../src/report.js';
 
 const HELP = `Usage:
@@ -146,7 +146,7 @@ async function main() {
     }
     const r = await applyFixes(dir, { minPriority, allowMajor, evidenceDir, runTests: !opts.noTests });
     // A pinned package can also get an override for a nested copy: one target, counted once.
-    const targets = new Set(r.plan.actions.map((a) => `${a.name}@${a.target}`));
+    const targets = new Set(r.plan.actions.map(targetLabel));
     process.stdout.write(`Verified ${new Set(r.verification.confirmed).size} of ${targets.size} upgrade target(s):\n${r.changes.map((c) => `  ${plain(c)}`).join('\n')}\n`);
     if (r.plan.notNeeded.length) process.stdout.write(`Not needed after the direct upgrades, so no override was written: ${plain(r.plan.notNeeded.join(', '))}\n`);
     for (const line of [...formatManual(r.plan.manual), ...formatMajor(r.plan.major), ...formatBundled(r.plan.bundled)]) process.stdout.write(line + '\n');

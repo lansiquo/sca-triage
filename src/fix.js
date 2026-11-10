@@ -305,6 +305,12 @@ function editPins(projectDir, command) {
 
 const RESTORE_HINT = 'node_modules may still hold the partial install: run "npm ci" to match the restored lockfile';
 
+// "foo@1.0.1", or "foo (npm:lodash)@4.17.21" for an alias. A pinned package that also gets an
+// override for a nested copy has one target in two actions, so callers count labels, not actions.
+export function targetLabel(a) {
+  return `${a.name === a.package ? a.name : `${a.name} (npm:${a.package})`}@${a.target}`;
+}
+
 // `exec` replaces npm and `verifyInstall` the post-install check, for tests with a fake npm.
 export async function applyFixes(projectDir, { minPriority = 'P3', allowMajor = false, evidenceDir, runTests = true, lookups, exec, verifyInstall = verifyTargets } = {}) {
   const before = await triage(projectDir, lookups);
@@ -500,8 +506,8 @@ function verifyTargets(projectDir, stages) {
       const got = project.resolveDependency(origin, action.name);
       return !got || got.realName !== action.package || got.version !== action.target;
     });
-    if (wrong.length) unresolved.push(`${action.name}@${action.target} (still different under ${wrong.map((o) => o || 'the project root').join(', ')})`);
-    else confirmed.push(`${action.name}@${action.target}`);
+    if (wrong.length) unresolved.push(`${targetLabel(action)} (still different under ${wrong.map((o) => o || 'the project root').join(', ')})`);
+    else confirmed.push(targetLabel(action));
   }
   return { confirmed, unresolved };
 }
