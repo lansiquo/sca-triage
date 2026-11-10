@@ -7,6 +7,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.2.4] - 2026-11-10
+
+### Fixed
+- README: the "Fix your own project" steps still ran the tool from a clone
+  (`node sca-triage/bin/sca-triage.js`). They now use `npx sca-triage`, like the rest of the README.
+  No code changes.
+
 ## [1.2.3] - 2026-11-10
 
 ### Fixed
