@@ -6,24 +6,21 @@ import { fileURLToPath } from 'node:url';
 const cli = fileURLToPath(new URL('../bin/sca-triage.js', import.meta.url));
 const run = (...args) => spawnSync(process.execPath, [cli, ...args], { encoding: 'utf8' });
 
-test('--help prints help and exits 0, with or without a command', () => {
+test('--help prints help and exits 0; no command prints it and exits 2', () => {
   for (const args of [['--help'], ['-h'], ['scan', '--help']]) {
     const r = run(...args);
     assert.equal(r.status, 0, args.join(' '));
     assert.match(r.stdout, /sca-triage/);
   }
+  const none = run();
+  assert.equal(none.status, 2);
+  assert.match(none.stdout, /sca-triage/);
 });
 
 test('--version prints the package version', () => {
   const r = run('--version');
   assert.equal(r.status, 0);
   assert.equal(r.stdout.trim(), JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version);
-});
-
-test('no command prints help and exits 2 (usage error)', () => {
-  const r = run();
-  assert.equal(r.status, 2);
-  assert.match(r.stdout, /sca-triage/);
 });
 
 // plan / fix --dry-run against a local fake registry: they must print the plan and change nothing.
@@ -85,14 +82,6 @@ for (const args of [['plan'], ['fix', '--dry-run']]) {
   });
 }
 
-test('plan rejects fix-only options (usage error, exit 2)', () => {
-  for (const extra of [['--apply'], ['--evidence', '/tmp/x'], ['--no-tests']]) {
-    const r = run('plan', fixture, ...extra);
-    assert.equal(r.status, 2, extra.join(' '));
-    assert.match(r.stderr, /does not support option/);
-  }
-});
-
 test('fix refuses a default evidence folder that is a symbolic link', (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'sca-evlink-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -103,19 +92,6 @@ test('fix refuses a default evidence folder that is a symbolic link', (t) => {
   const r = run('fix', join(dir, 'app'), '--no-tests');
   assert.equal(r.status, 2);
   assert.match(r.stderr, /is a symbolic link; pass --evidence/);
-});
-
-test('fix rejects --dry-run combined with --apply', () => {
-  const r = run('fix', fixture, '--dry-run', '--apply');
-  assert.equal(r.status, 2);
-});
-
-test('a second directory is a usage error, not silently ignored', () => {
-  for (const cmd of ['scan', 'plan', 'fix']) {
-    const r = run(cmd, fixture, '/tmp/another-dir');
-    assert.equal(r.status, 2, cmd);
-    assert.match(r.stderr, /takes one directory, got 2/);
-  }
 });
 
 // The exit code is the CI gate (the GitHub Action fails the build on 1).
@@ -142,13 +118,29 @@ test('scan exits 1 when a finding meets --fail-on and 0 when none does, with --j
   }
 });
 
-test('an unknown command or --fail-on value is a usage error (exit 2)', () => {
-  const unknown = run('audit', fixture);
-  assert.equal(unknown.status, 2);
-  assert.match(unknown.stderr, /unknown command "audit"/);
-  const badGate = run('scan', fixture, '--fail-on', 'P9');
-  assert.equal(badGate.status, 2);
-  assert.match(badGate.stderr, /--fail-on must be one of/);
+// Bad input must stop before any project is read or changed: /missing doesn't exist, and
+// each error is about the option, never about a missing package.json.
+test('usage errors exit 2 before anything is read or changed', () => {
+  const missing = '/missing';
+  for (const [args, message] of [
+    [['audit', missing], /unknown command "audit"/],
+    [['scan', missing, '--fail-on', 'P9'], /--fail-on must be one of/],
+    [['scan', missing, '--fail-on', '--json'], /--fail-on requires a value/],
+    [['scan', missing, '--markdown', '--json'], /--markdown requires a value/],
+    [['scan', missing, '--apply'], /scan does not support option/],
+    [['plan', missing, '--min-priority'], /--min-priority requires a value/],
+    ...[['--apply'], ['--evidence', '/tmp/x'], ['--no-tests']].map((extra) => [['plan', missing, ...extra], /plan does not support option/]),
+    // "--min-priority --dry-run" used to take --dry-run as the priority and apply the upgrades.
+    [['fix', missing, '--min-priority', '--dry-run', '--no-tests'], /--min-priority requires a value/],
+    [['fix', missing, '--min-priority', 'garbage'], /--min-priority must be one of P1, P2, P3/],
+    [['fix', missing, '--evidence', '--no-tests'], /--evidence requires a value/],
+    [['fix', missing, '--dry-run', '--apply'], /--dry-run and --apply cannot be combined/],
+    ...['scan', 'plan', 'fix'].map((cmd) => [[cmd, missing, '/tmp/another-dir'], /takes one directory, got 2/]),
+  ]) {
+    const r = run(...args);
+    assert.equal(r.status, 2, args.join(' '));
+    assert.match(r.stderr, message, args.join(' '));
+  }
 });
 
 test('fix with nothing to upgrade changes no files, exits 0 and still writes the evidence', async () => {

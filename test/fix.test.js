@@ -103,6 +103,15 @@ test('overrides merge into npm syntax without losing existing entries', () => {
   const { overrides, changes } = applyOverrides({ a: '3.0.0', b: { z: '1.0.0' } }, actions);
   assert.deepEqual(overrides, { x: '1.0.5', a: { '.': '3.0.0', y: '2.0.1' }, b: { z: '1.0.0', y: '2.0.1' } });
   assert.equal(changes.length, 3);
+  // An existing nested entry keeps its children, the caller's object is left alone, and a
+  // package named like an Object.prototype key is stored as data.
+  const original = { x: { '.': '1.0.0', y: '2.0.1' }, parent: { x: { '.': '1.0.0', z: '3.0.0' } } };
+  const merged = applyOverrides(original, [{ overrides: [{ scope: null, name: 'x', spec: '1.0.1' }, { scope: 'parent', name: 'x', spec: '1.0.1' }, { scope: null, name: '__proto__', spec: '1.0.1' }] }]).overrides;
+  assert.deepEqual(merged.x, { '.': '1.0.1', y: '2.0.1' });
+  assert.deepEqual(merged.parent.x, { '.': '1.0.1', z: '3.0.0' });
+  assert.equal(merged.__proto__, '1.0.1');
+  assert.equal(Object.getPrototypeOf(merged), Object.prototype);
+  assert.equal(original.x['.'], '1.0.0');
 });
 
 test('pins are grouped into one npm install per manifest and dependency type', () => {

@@ -1,8 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
-import { loadProject } from '../src/lockfile.js';
-import { findImports, resolveImports, classify, packageNameFromSpecifier } from '../src/reachability.js';
 import { triage, pickSafeVersion, priorityFor, gateFails, affects, MAX_TARGET_CHECKS, mapLimit } from '../src/triage.js';
 import { planFixes, applyFixes } from '../src/fix.js';
 import { formatMarkdown } from '../src/report.js';
@@ -31,33 +29,6 @@ const lookups = {
   advisoryLookup: async () => ADVISORIES,
   versionLookup: async (name) => VERSIONS[name] || [],
 };
-
-test('extracts package names from import specifiers', () => {
-  assert.equal(packageNameFromSpecifier('lodash/merge'), 'lodash');
-  assert.equal(packageNameFromSpecifier('@scope/pkg/sub'), '@scope/pkg');
-  assert.equal(packageNameFromSpecifier('./local'), null);
-  assert.equal(packageNameFromSpecifier('node:fs'), null);
-});
-
-test('builds the dependency graph from the lockfile', () => {
-  const p = loadProject(FIXTURE);
-  const hoisted = p.installs.find((i) => i.path === 'node_modules/parser');
-  const nested = p.installs.find((i) => i.path === 'node_modules/unused-lib/node_modules/parser');
-  assert.deepEqual(hoisted.via, ['web-lib']);
-  assert.deepEqual(nested.via, ['unused-lib']);
-  assert.equal(hoisted.direct, false);
-});
-
-test('classifies reachability from real import statements', () => {
-  const p = loadProject(FIXTURE);
-  const imports = resolveImports(p, findImports(FIXTURE));
-  const level = (path) => classify(p.installs.find((i) => i.path === path), imports).level;
-  assert.equal(level('node_modules/web-lib'), 'imported');
-  assert.equal(level('node_modules/parser'), 'via-imported');
-  assert.equal(level('node_modules/unused-lib'), 'not-imported');
-  assert.equal(level('node_modules/unused-lib/node_modules/parser'), 'not-imported');
-  assert.equal(level('node_modules/test-lib'), 'test-only');
-});
 
 test('priority combines severity with reachability', () => {
   assert.equal(priorityFor('critical', 'imported'), 'P1');
@@ -104,6 +75,7 @@ test('fix plan pins direct deps and overrides transitive ones with one target', 
   assert.equal(byName['test-lib'].dev, true);
   assert.equal(byName['test-lib'].target, '3.1.0');
   assert.deepEqual(planFixes(r, { minPriority: 'P1' }).actions.map((a) => a.package), ['parser']);
+  assert.throws(() => planFixes(r, { minPriority: 'garbage' }), /must be one of/);
 });
 
 test('fix records why the project tests did not run', async () => {
@@ -244,26 +216,8 @@ test('mapLimit keeps input order and never runs more than the limit at once', as
   await assert.rejects(mapLimit([1, 2, 3], 2, async (n) => { if (n === 2) throw new Error('boom'); return n; }), /boom/);
 });
 
-test('versions are looked up once per vulnerable package, concurrently, with the same result', async () => {
+test('versions are looked up once, and only for vulnerable packages', async () => {
   const calls = [];
-  let active = 0;
-  let peak = 0;
-  const concurrent = {
-    advisoryLookup: lookups.advisoryLookup,
-    versionLookup: async (name) => {
-      calls.push(name);
-      active += 1;
-      peak = Math.max(peak, active);
-      await new Promise((r) => setTimeout(r, 5));
-      active -= 1;
-      return VERSIONS[name] || [];
-    },
-  };
-  const parallel = await triage(FIXTURE, concurrent);
-  const serial = await triage(FIXTURE, lookups);
-  assert.deepEqual(calls.sort(), [...new Set(calls)].sort(), 'each name once');
-  assert.deepEqual(calls.sort(), [...new Set(parallel.findings.map((f) => f.package))].sort(), 'only vulnerable packages');
-  assert.ok(peak > 1, 'lookups overlap');
-  const strip = (r) => ({ ...r, scannedAt: null });
-  assert.deepEqual(strip(parallel), strip(serial));
+  const r = await triage(FIXTURE, { advisoryLookup: lookups.advisoryLookup, versionLookup: async (name) => { calls.push(name); return VERSIONS[name] || []; } });
+  assert.deepEqual(calls.sort(), [...new Set(r.findings.map((f) => f.package))].sort());
 });

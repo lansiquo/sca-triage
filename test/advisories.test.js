@@ -4,7 +4,9 @@ import { createServer } from 'node:http';
 import { normalizeAdvisories, registryUrl, severityRank, fetchJson, retryDelay } from '../src/advisories.js';
 
 test('rejects advisory responses that are not the documented shape', () => {
-  for (const raw of [null, [], 'ok', { lodash: 'nope' }, { lodash: [{ severity: 'high' }] }, { lodash: [null] }]) {
+  // Severity decides the priority and the gate, so a missing or unknown one is an error too.
+  const badSeverity = [undefined, null, {}, 3, 'urgent', 'HIGH'].map((severity) => ({ lodash: [{ vulnerable_versions: '*', severity }] }));
+  for (const raw of [null, [], 'ok', { lodash: 'nope' }, { lodash: [{ severity: 'high' }] }, { lodash: [null] }, ...badSeverity]) {
     assert.throws(() => normalizeAdvisories(raw), /advisory response/, JSON.stringify(raw));
   }
   const out = normalizeAdvisories({ lodash: [{ url: 'https://github.com/advisories/GHSA-1', vulnerable_versions: '<4.17.21', severity: 'high' }] });

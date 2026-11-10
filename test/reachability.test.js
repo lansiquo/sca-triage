@@ -127,7 +127,9 @@ test('files count by their real location, and files too large to read are report
   assert.deepEqual(imports.skipped, ['big.js']);
 });
 
-test('ignores URL-style and subpath-import specifiers', () => {
+test('reads the package name from an import specifier, and ignores URL-style and subpath imports', () => {
+  assert.equal(packageNameFromSpecifier('lodash/merge'), 'lodash');
+  assert.equal(packageNameFromSpecifier('./local'), null);
   assert.equal(packageNameFromSpecifier('node:fs'), null);
   assert.equal(packageNameFromSpecifier('https://example.com/x.js'), null);
   assert.equal(packageNameFromSpecifier('#internal'), null);

@@ -4,10 +4,9 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { loadProject } from '../src/lockfile.js';
-import { normalizeAdvisories } from '../src/advisories.js';
 import { findImports } from '../src/reachability.js';
 import { triage } from '../src/triage.js';
 import { planFixes, applyOverrides, applyFixes } from '../src/fix.js';
@@ -41,20 +40,6 @@ function run(args, env = {}) {
   });
 }
 
-test('F01: missing option values and invalid priorities fail before reading or mutating a project', () => {
-  for (const args of [
-    ['fix', '/missing', '--min-priority', '--dry-run', '--no-tests'],
-    ['fix', '/missing', '--min-priority', 'garbage'], ['plan', '/missing', '--min-priority'],
-    ['scan', '/missing', '--markdown', '--json'], ['fix', '/missing', '--evidence', '--no-tests'],
-    ['scan', '/missing', '--fail-on', '--json'], ['scan', '/missing', '--apply'],
-  ]) {
-    const r = spawnSync(process.execPath, [cli, ...args], { encoding: 'utf8' });
-    assert.equal(r.status, 2); assert.match(r.stderr, /requires a value|must be one of|does not support/);
-    assert.doesNotMatch(r.stderr, /no package/);
-  }
-  assert.throws(() => planFixes({ findings: [] }, { minPriority: 'garbage' }), /must be one of/);
-});
-
 test('F03: two versions of one parent that need different targets are left for a manual upgrade', () => {
   // npm 10 does not reliably apply "parent@version" keys, and one "parent" key can hold one version.
   const result = { findings: [
@@ -78,16 +63,6 @@ test('F04: identical workspace aliases retain distinct registry identities', () 
   ]);
 });
 
-test('F05: override updates preserve nested children and prototype-like keys', () => {
-  const original = { x: { '.': '1.0.0', y: '2.0.1' }, parent: { x: { '.': '1.0.0', z: '3.0.0' } } };
-  const actions = [{ overrides: [{ scope: null, name: 'x', spec: '1.0.1' }, { scope: 'parent', name: 'x', spec: '1.0.1' }, { scope: null, name: '__proto__', spec: '1.0.1' }] }];
-  const { overrides } = applyOverrides(original, actions);
-  assert.deepEqual(overrides.x, { '.': '1.0.1', y: '2.0.1' });
-  assert.deepEqual(overrides.parent.x, { '.': '1.0.1', z: '3.0.0' });
-  assert.equal(overrides.__proto__, '1.0.1'); assert.equal(Object.getPrototypeOf(overrides), Object.prototype);
-  assert.equal(original.x['.'], '1.0.0');
-});
-
 test('F06: malformed and incomplete inventories fail, absent optional dependencies remain valid', (t) => {
   const dir = project(t);
   for (const lock of [
@@ -100,16 +75,14 @@ test('F06: malformed and incomplete inventories fail, absent optional dependenci
   assert.equal(loadProject(optional).installs.length, 0);
 });
 
-test('lockfiles real npm writes still load: peers left out by legacy-peer-deps, file: folders outside the project', (t) => {
+test('lockfiles npm really writes still load: skipped peers, outside file: folders, empty specs, build metadata, a git dependency with no version', (t) => {
+  // npm leaves peers out with legacy-peer-deps, and a file: folder outside the project gets no installs.
   const peers = project(t, { dependencies: { a: '1.0.0' } }, { 'node_modules/a': { version: '1.0.0', peerDependencies: { p: '^1.0.0' } } });
   assert.equal(loadProject(peers).installs.length, 1);
   const linked = project(t, { dependencies: { shared: 'file:../shared' } }, {
     '../shared': { version: '1.0.0', dependencies: { c: '1.0.0' } }, 'node_modules/shared': { resolved: '../shared', link: true },
   });
   assert.equal(loadProject(linked).installs.length, 0);
-});
-
-test('valid lockfiles that look unusual still load: empty specs, build metadata, a git dependency with no version', (t) => {
   const tgz = (file) => `https://registry.npmjs.org/x/-/${file}.tgz`;
   const any = project(t, { dependencies: { x: '' } }, { 'node_modules/x': { version: '1.0.0', resolved: tgz('x-1.0.0'), dependencies: { y: '' } }, 'node_modules/y': { version: '1.0.0' } });
   assert.equal(loadProject(any).installs.length, 2);
@@ -159,12 +132,6 @@ test('an entry whose name or version is not what its registry tarball contains i
   }
   const scoped = { name: '@s/real', version: '2.0.0', resolved: 'https://registry.npmjs.org/@s/real/-/real-2.0.0.tgz' };
   assert.equal(loadProject(project(t, { dependencies: { x: 'npm:@s/real@2.0.0' } }, { 'node_modules/x': scoped })).installs[0].realName, '@s/real');
-});
-
-test('F07: missing or unsupported severity is an input error', () => {
-  for (const severity of [undefined, null, {}, 3, 'urgent', 'HIGH']) {
-    assert.throws(() => normalizeAdvisories({ x: [{ vulnerable_versions: '*', severity }] }), /severity/);
-  }
 });
 
 test('F08 and F15: long declarations and dense imports retain evidence within bounded processing time', (t) => {
