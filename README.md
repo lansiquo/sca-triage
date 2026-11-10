@@ -53,10 +53,12 @@ Gate (--fail-on P1): FAIL
 
 The scan matches 437 advisories across 180 vulnerable packages and narrows "fix now" to 12 P1
 packages the app loads, either directly or through an imported dependency such as `express` or
-`mongodb`. `plan` lists 10 upgrades for them: 4 direct dependencies pinned with `npm install`
-(`marked` and `mongodb` are major upgrades) and 6 transitive packages fixed with npm `overrides`.
-`express` requires `body-parser` 1.18.3 exactly, so it also gets an override for the new version.
-Two are left for you: `swig` has no fixed release, so it needs replacing rather than upgrading, and
+`mongodb`. `plan` lists 7 upgrades for them: 2 direct dependencies pinned with `npm install` and 5
+transitive packages fixed with npm `overrides`. `express` requires `body-parser` 1.18.3 exactly, so
+it also gets an override for the new version. Three have only a major upgrade (`marked` 0.3.5 to
+4.0.10, `mongodb` 2.2.36 to 3.1.13, `minimist` 0.0.10 to 0.2.4), so `plan` lists them for review
+and `fix` applies them only with `--allow-major`. Two are left for you: `swig` has no fixed release,
+so it needs replacing rather than upgrading, and
 `qs` needs a manual upgrade, because the override that would reach it (`"request" > "qs"`) would
 also force `zaproxy`'s `qs` 0.6.6 up to 6.16.1, a major jump nobody asked for.
 
@@ -66,12 +68,15 @@ as build and test tools, 61 are bundled inside other packages, which overrides c
 have no fixed release. These groups overlap: a development-only package can also be bundled.
 Without `--min-priority`, `fix` works through every priority.
 
-`fix` applies the 10 upgrades to the copy and confirms all 10 in the new lockfile. NodeGoat's
-`npm test` runs no tests (its unit-test folder doesn't exist), so the run uses `--no-tests` and the
-report marks the upgrades unverified. The rescan finds 170 vulnerable packages and 2 P1: `swig` and
-`qs`. Counts follow the advisory database and the versions npm installs at the time, so a new run
-can differ slightly. The [case study](https://dotrobin.dev/sca-triage.html) shows the full output of
-each step.
+`fix` installs the 2 pins, rescans, writes the overrides still needed, and confirms all 7 upgrades
+in the new lockfile. NodeGoat's `npm test` runs no tests (its unit-test folder doesn't exist), so
+the run uses `--no-tests` and the report marks the upgrades unverified. The rescan finds 173
+vulnerable packages and 5 P1: the three majors, `swig` and `qs`. With `--allow-major`, `fix` also
+applies the majors; `mongodb` 3.1.13 brings a safe `bson`, so that override isn't written, and the
+rescan finds 170 vulnerable packages and 2 P1. Counts follow the advisory database and the versions
+npm installs at the time, so a new run can differ slightly. The
+[case study](https://dotrobin.dev/sca-triage.html) shows the full output of each step from
+version 1.2.3.
 
 ## Use it on your project
 
