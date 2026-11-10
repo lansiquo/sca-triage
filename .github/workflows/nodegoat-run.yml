@@ -1,0 +1,44 @@
+# One-off: run sca-triage from this branch on OWASP NodeGoat at a pinned commit, for the
+# README example. Runs only on this temporary branch.
+name: nodegoat-run
+
+on:
+  push:
+    branches: [nodegoat-fix-run-5]
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          path: sca-triage
+          fetch-depth: 2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - name: NodeGoat run
+        shell: bash
+        run: |
+          set +e
+          sca() { node sca-triage/bin/sca-triage.js "$@"; }
+          echo "sca-triage $(git -C sca-triage rev-parse --short HEAD^) (fix/review-feedback), node $(node -v), npm $(npm -v)"
+          git clone -q https://github.com/OWASP/NodeGoat.git
+          git -C NodeGoat checkout -q c5cb68a
+          echo "NodeGoat $(git -C NodeGoat rev-parse --short HEAD)"
+          step() { echo "$ sca-triage ${*:2}"; "$@" 2>&1; echo "[exit $?]"; }
+          step sca scan NodeGoat
+          step sca plan NodeGoat --min-priority P1
+          echo '$ cp -r NodeGoat NodeGoat-fixed'; cp -r NodeGoat NodeGoat-fixed
+          step sca fix NodeGoat-fixed --min-priority P1 --no-tests --evidence evidence
+          step sca scan NodeGoat-fixed
+          echo '$ cat evidence/REPORT.md'; cat evidence/REPORT.md
+          echo "npm ls invalid entries after fix: $(cd NodeGoat-fixed && npm ls --all 2>&1 | grep -c invalid)"
+          echo '=== with --allow-major'
+          echo '$ cp -r NodeGoat NodeGoat-major'; cp -r NodeGoat NodeGoat-major
+          step sca fix NodeGoat-major --min-priority P1 --allow-major --no-tests --evidence evidence-major
+          step sca scan NodeGoat-major
+          echo "npm ls invalid entries after fix --allow-major: $(cd NodeGoat-major && npm ls --all 2>&1 | grep -c invalid)"
