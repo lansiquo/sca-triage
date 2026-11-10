@@ -6,7 +6,7 @@ import { resolve, join } from 'node:path';
 import { writeFileSync, existsSync, lstatSync } from 'node:fs';
 import { triage, gateFails } from '../src/triage.js';
 import { planFixes, applyFixes, pinCommands } from '../src/fix.js';
-import { formatTable, formatMarkdown, formatTestsLine, displayName, plain, formatBundled, formatManual } from '../src/report.js';
+import { formatTable, formatMarkdown, formatTestsLine, displayName, plain, lineStart, formatBundled, formatManual } from '../src/report.js';
 
 const HELP = `Usage:
   sca-triage scan [dir] [--json] [--markdown <file>] [--fail-on P1|P2|P3|none]
@@ -112,10 +112,10 @@ async function main() {
         ];
         const label = displayName({ package: a.package, installedAs: a.name });
         process.stdout.write(
-          `${plain(`${label}: ${[...new Set(a.from)].join(', ')} -> ${a.target}`)}${a.crossesMajor ? '  (major upgrade: review release notes)' : ''}\n${how.map((h) => `    ${plain(h)}\n`).join('')}`,
+          `${lineStart(`${label}: ${[...new Set(a.from)].join(', ')} -> ${a.target}`)}${a.crossesMajor ? '  (major upgrade: review release notes)' : ''}\n${how.map((h) => `    ${plain(h)}\n`).join('')}`,
         );
       }
-      for (const f of plan.unfixable) process.stdout.write(plain(`${displayName(f)}@${f.version}: ${f.fix.verified === false && f.fix.target ? 'candidate target is unverified; review manually' : 'no fixed version published yet'}`) + '\n');
+      for (const f of plan.unfixable) process.stdout.write(lineStart(`${displayName(f)}@${f.version}: ${f.fix.verified === false && f.fix.target ? 'candidate target is unverified; review manually' : 'no fixed version published yet'}`) + '\n');
       for (const line of [...formatManual(plan.manual), ...formatBundled(plan.bundled)]) process.stdout.write(line + '\n');
       for (const w of result.warnings || []) process.stderr.write(`warning: ${plain(w)}\n`);
       process.stdout.write('\nDry run: nothing was changed. Run "sca-triage fix" to apply these upgrades.\n');

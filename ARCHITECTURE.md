@@ -100,8 +100,8 @@ The JSON inventory includes the installed nodes and dependency paths used to che
 
 - No third-party dependencies; Node.js built-ins only.
 - npm calls go through an argument allowlist, installs use `--ignore-scripts`, and npm's fund, audit and update-notifier messages are turned off.
-- Source scanning: files under 2 MB (larger ones are named in a warning), `node_modules` and `.git` skipped everywhere and build output folders at the project root, symlinks followed only inside the project with each file read once and classified by its real path, and a linear tokenizer with set-based evidence deduplication.
-- Lockfile: each registry entry's name and version must match its tarball URL, so an edited entry can't make the scan check a different package than npm installs.
+- Source scanning: files under 2 MB (larger ones are named in a warning), `node_modules` and `.git` skipped everywhere and build output folders at the project root, symlinks followed only inside the project with each file read once and classified by its real path, and a linear tokenizer with set-based evidence deduplication. The tokenizer skips comments, strings and regular expressions. In `.vue`, `.svelte` and `.astro` files it reads only the script blocks. Text it can't read reliably (a line with an unpaired quote, or everything after an unclosed comment or template literal) is searched with bounded patterns instead, which count more than they should rather than less.
+- Lockfile: each registry entry's name and version must match its tarball URL, so an edited entry can't make the scan check a different package than npm installs. A git, file or URL dependency can't be checked that way; one with no version is skipped with a warning.
 - Output: untrusted names and paths are escaped in Markdown, and terminal control characters are replaced in console output.
 - Evidence: `REPORT.md`, `before.json` and `after.json`, both lockfiles, both test logs and a CycloneDX SBOM from `npm sbom`.
 

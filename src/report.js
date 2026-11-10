@@ -32,6 +32,12 @@ export function plain(value) {
   return String(value).replace(CONTROL, ' ');
 }
 
+// plain(), for text that starts a line. GitHub Actions reads a line that starts with "::" or
+// "##[" as a workflow command, so a name from the scanned project loses those characters.
+export function lineStart(value) {
+  return plain(value).replace(/^[\s:#]+/, '');
+}
+
 // "foo (npm:lodash)" for an aliased install, "lodash" otherwise.
 export function displayName(f) {
   return f.installedAs && f.installedAs !== f.package ? `${f.installedAs} (npm:${f.package})` : f.package;
@@ -72,7 +78,7 @@ export function upgradeText(f, esc = plain) {
 export function formatTable(result) {
   const lines = [];
   const s = result.summary;
-  lines.push(`${plain(result.project)}: ${result.packagesScanned} packages scanned, ${result.findings.length} vulnerable (P1: ${s.P1}, P2: ${s.P2}, P3: ${s.P3})`);
+  lines.push(`${lineStart(result.project)}: ${result.packagesScanned} packages scanned, ${result.findings.length} vulnerable (P1: ${s.P1}, P2: ${s.P2}, P3: ${s.P3})`);
   for (const w of result.warnings || []) lines.push(`warning: ${plain(w)}`);
   if (!result.findings.length) {
     lines.push('No known vulnerabilities in the installed versions.');

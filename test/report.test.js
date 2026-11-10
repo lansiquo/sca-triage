@@ -41,6 +41,12 @@ test('shows aliased packages with both names', () => {
   assert.match(formatTable(result([f])), /\[P1\] foo \(npm:lodash\)@4\.17\.20/);
 });
 
+test('a project name cannot start a line with a GitHub Actions workflow command', () => {
+  for (const name of ['::notice title=x::fake', '  ::error::fake', '##[error]fake']) {
+    assert.match(formatTable({ project: name, packagesScanned: 0, summary: { P1: 0, P2: 0, P3: 0 }, findings: [], warnings: [] }).split('\n')[0], /^[^\s:#]/);
+  }
+});
+
 test('strips terminal control characters from the table', () => {
   const out = formatTable(result([finding({ installedAs: 'a\u001b[2Jb' })]));
   assert.doesNotMatch(out, /\u001b/);

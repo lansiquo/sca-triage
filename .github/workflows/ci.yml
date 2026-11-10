@@ -1,4 +1,4 @@
-# Unit, real-npm integration, and packed-consumer checks.
+# Unit, real-npm integration and packed-consumer checks, and a run of the Action itself.
 
 name: ci
 
@@ -27,3 +27,45 @@ jobs:
       - run: npm test
       - run: npm run test:pack
 
+  # Runs action.yml the way a user's workflow does. It asks registry.npmjs.org about lodash.
+  action:
+    name: action (gate and job summary)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - name: Create a clean project and a vulnerable one
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/clean" "$RUNNER_TEMP/vulnerable"
+          cd "$RUNNER_TEMP/clean"
+          echo '{"name":"clean","version":"1.0.0"}' > package.json
+          echo '{"name":"clean","version":"1.0.0","lockfileVersion":3,"packages":{"":{"name":"clean","version":"1.0.0"}}}' > package-lock.json
+          # lodash 4.17.20 has high-severity advisories and index.js loads it: a P1.
+          # The project name tries to add an annotation to this log; it must stay plain text.
+          cd "$RUNNER_TEMP/vulnerable"
+          name='::error title=sca-triage injection test::this must not become an annotation'
+          echo "{\"name\":\"$name\",\"version\":\"1.0.0\",\"dependencies\":{\"lodash\":\"4.17.20\"}}" > package.json
+          echo "{\"name\":\"$name\",\"version\":\"1.0.0\",\"lockfileVersion\":3,\"packages\":{\"\":{\"name\":\"$name\",\"version\":\"1.0.0\",\"dependencies\":{\"lodash\":\"4.17.20\"}},\"node_modules/lodash\":{\"version\":\"4.17.20\",\"resolved\":\"https://registry.npmjs.org/lodash/-/lodash-4.17.20.tgz\"}}}" > package-lock.json
+          echo "require('lodash');" > index.js
+          node -e "for (const d of ['clean', 'vulnerable']) JSON.parse(require('fs').readFileSync(process.env.RUNNER_TEMP + '/' + d + '/package-lock.json', 'utf8'))"
+      - name: A project with nothing vulnerable passes
+        uses: ./
+        with:
+          path: ${{ runner.temp }}/clean
+      - name: A loaded high-severity package fails the gate (this step is expected to fail)
+        id: gate
+        continue-on-error: true
+        uses: ./
+        with:
+          path: ${{ runner.temp }}/vulnerable
+      - name: The same project passes with fail-on none
+        uses: ./
+        with:
+          path: ${{ runner.temp }}/vulnerable
+          fail-on: none
+      - name: The gate step failed
+        shell: bash
+        run: test "${{ steps.gate.outcome }}" = "failure"

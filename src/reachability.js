@@ -121,32 +121,113 @@ function isTestPath(rel, workspaceRoots) {
   return false;
 }
 
+// Fallback patterns for text the tokenizer below can't read reliably. They over-match on
+// purpose (code in a comment counts): when unsure, a package counts as loaded. The gaps
+// they allow are bounded, so a hostile file can't make them backtrack quadratically.
+const Q = `(['"])`; // opening quote, closed with \\1
+const SPEC = `([^'"\`\\s]{1,500})`; // a package specifier, maybe with a subpath
+const COMMENTS = `\\s*(?:(?:\\/\\*(?:[^*]|\\*(?!\\/)){0,400}\\*\\/|\\/\\/[^\\n]{0,400}\\n)\\s*){0,8}`;
+// require('x'), require.resolve('x'), import('x')
+const CALL_PATTERNS = [
+  new RegExp(`\\brequire(?:\\s*\\.\\s*resolve)?\\s*\\(${COMMENTS}${Q}${SPEC}\\1`, 'g'),
+  new RegExp(`\\bimport\\s*\\(${COMMENTS}${Q}${SPEC}\\1`, 'g'),
+];
+// ... plus import 'x' and the source of import/export ... from 'x'
+const FALLBACK_PATTERNS = [
+  ...CALL_PATTERNS,
+  new RegExp(`\\bimport${COMMENTS}${Q}${SPEC}\\1`, 'g'),
+  new RegExp(`\\bfrom${COMMENTS}${Q}${SPEC}\\1`, 'g'),
+];
+
+function patternHits(text, offset, patterns) {
+  const hits = [];
+  for (const re of patterns) for (const m of text.matchAll(re)) hits.push({ spec: m[2], index: offset + m.index });
+  return hits;
+}
+
+// Words and punctuation after which "/" starts a regular expression rather than a division.
+// Not after ")", "]", "}" or "<": that is division, or a JSX closing tag.
+const REGEX_AFTER_WORD = new Set(['return', 'typeof', 'instanceof', 'in', 'of', 'new', 'delete', 'void', 'throw', 'case', 'do', 'else', 'yield', 'await']);
+const REGEX_AFTER_PUNCT = new Set(['(', ',', '=', ':', '[', '!', '&', '|', '?', '{', ';', '+', '-', '*', '%', '~', '^', '>']);
+
+function regexCanStart(prev, next) {
+  if (next === '>') return false; // "/>" closes a JSX tag
+  if (!prev) return true;
+  if (prev.literal || prev.regex) return false;
+  return /^[\w$]/.test(prev.value) ? REGEX_AFTER_WORD.has(prev.value) : REGEX_AFTER_PUNCT.has(prev.value);
+}
+
+// The offset just past the regular expression that starts at text[i], or -1 if it doesn't
+// end on its line. "/" inside a character class ([/]) doesn't end it.
+function regexEnd(text, i) {
+  let inClass = false;
+  for (let k = i + 1; k < text.length; k++) {
+    const ch = text[k];
+    if (ch === '\n') return -1;
+    if (ch === '\\') {
+      if (text[k + 1] === '\n') return -1;
+      k++;
+    } else if (ch === '[') inClass = true;
+    else if (ch === ']') inClass = false;
+    else if (ch === '/' && !inClass) {
+      k++;
+      while (k < text.length && /[a-z]/i.test(text[k])) k++;
+      return k;
+    }
+  }
+  return -1;
+}
+
 // A single lexical pass avoids both declaration-length limits and regex backtracking.
-// This is an import inventory, not a JavaScript parser: conservative matches are OK.
+// This is an import inventory, not a JavaScript parser. Whatever it can't read reliably is
+// returned in `unsure` as { start, end } ranges for the fallback patterns:
+//   - a line with a quote that has no partner on it, or a "/" that looks like the start of a
+//     regular expression but never ends (an apostrophe in JSX text, unusual syntax);
+//   - everything after a comment or template literal that is never closed.
 function tokens(text) {
   const out = [];
+  const unsure = [];
   let line = 1, braceDepth = 0;
+  let oddLine = 0; // a line already handed to the fallback: its quotes and slashes stay punctuation
   const templates = [];
+  const lineEnd = (i) => {
+    const n = text.indexOf('\n', i);
+    return n === -1 ? text.length : n;
+  };
+  const giveUpOnLine = (i) => {
+    oddLine = line;
+    unsure.push({ start: text.lastIndexOf('\n', i - 1) + 1, end: lineEnd(i) });
+  };
   for (let i = 0; i < text.length;) {
     const c = text[i];
     if (/\s/.test(c)) { if (c === '\n') line++; i++; continue; }
-    if (text.startsWith('//', i)) { while (i < text.length && text[i] !== '\n') i++; continue; }
+    if (text.startsWith('//', i)) { i = lineEnd(i); continue; }
     if (text.startsWith('/*', i)) {
-      i += 2;
-      while (i < text.length && !text.startsWith('*/', i)) { if (text[i++] === '\n') line++; }
-      i += 2;
+      const close = text.indexOf('*/', i + 2);
+      if (close === -1) { unsure.push({ start: i, end: text.length }); break; }
+      for (let k = i; k < close; k++) if (text[k] === '\n') line++;
+      i = close + 2;
       continue;
+    }
+    if (c === '/' && oddLine !== line && regexCanStart(out.at(-1), text[i + 1])) {
+      const close = regexEnd(text, i);
+      if (close !== -1) { out.push({ value: '/regex/', regex: true, line }); i = close; continue; }
+      giveUpOnLine(i);
     }
     const startLine = line;
     const continuation = c === '}' && templates.at(-1) === braceDepth;
-    if (c === '"' || c === "'" || c === '`' || continuation) {
-      if (continuation) { templates.pop(); braceDepth--; }
+    if (c === '`' || continuation || ((c === '"' || c === "'") && oddLine !== line)) {
+      const start = i;
       const quote = continuation ? '`' : c;
-      let value = '', complete = true;
+      let value = '', complete = true, closed = false;
       i++;
-      while (i < text.length && text[i] !== quote) {
-        if (text[i] === '\n') line++;
-        if (quote === '`' && text.startsWith('${', i)) { complete = false; break; }
+      while (i < text.length) {
+        if (text[i] === quote) { closed = true; break; }
+        if (text[i] === '\n') {
+          if (quote !== '`') break; // only template literals span lines
+          line++;
+        }
+        if (quote === '`' && text.startsWith('${', i)) { complete = false; closed = true; break; }
         if (text[i] === '\\' && i + 1 < text.length) {
           i++;
           const escape = text[i];
@@ -161,7 +242,17 @@ function tokens(text) {
         }
         value += text[i++];
       }
-      if (!continuation) out.push({ value, literal: true, template: quote === '`', complete, line: startLine });
+      if (!closed) {
+        if (quote === '`') { unsure.push({ start, end: text.length }); break; }
+        // No partner on this line: not a string. Keep the quote as punctuation and read on.
+        line = startLine;
+        giveUpOnLine(start);
+        out.push({ value: c, line });
+        i = start + 1;
+        continue;
+      }
+      if (continuation) { templates.pop(); braceDepth--; }
+      else out.push({ value, literal: true, template: quote === '`', complete, line: startLine });
       if (!complete) {
         templates.push(++braceDepth);
         i += 2; // Continue lexing the expression inside ${...}.
@@ -178,11 +269,58 @@ function tokens(text) {
       out.push({ value: c, line }); i++;
     }
   }
-  return out;
+  return { tokens: out, unsure };
 }
 
-function* specifiers(text) {
-  const ts = tokens(text);
+// In .vue, .svelte and .astro files only <script> blocks, and Astro's leading "---" block,
+// are JavaScript; the rest is HTML, where an apostrophe is just text.
+const SFC_EXT = /\.(?:vue|svelte|astro)$/;
+
+function scriptRanges(text, file) {
+  const ranges = [];
+  let pos = 0;
+  const front = file.endsWith('.astro') ? /^﻿?---\r?\n/.exec(text) : null;
+  if (front) {
+    const close = text.indexOf('\n---', front[0].length - 1);
+    pos = close === -1 ? text.length : close;
+    ranges.push([front[0].length, pos]);
+  }
+  const lower = text.toLowerCase();
+  while (pos < text.length) {
+    const open = lower.indexOf('<script', pos);
+    const gt = open === -1 ? -1 : text.indexOf('>', open);
+    if (gt === -1) break;
+    const close = lower.indexOf('</script', gt);
+    ranges.push([gt + 1, close === -1 ? text.length : close]);
+    if (close === -1) break;
+    pos = close + 8;
+  }
+  return ranges;
+}
+
+// `text` with everything inside (or, with keep = false, outside) the ranges turned into
+// spaces. Line breaks stay, so offsets and line numbers still match the file.
+function blank(text, ranges, keep) {
+  const spaces = (from, to) => text.slice(from, to).replace(/[^\n]/g, ' ');
+  let out = '', pos = 0;
+  for (const [start, end] of ranges) {
+    out += keep ? spaces(pos, start) + text.slice(start, end) : text.slice(pos, start) + spaces(start, end);
+    pos = end;
+  }
+  return out + (keep ? spaces(pos, text.length) : text.slice(pos));
+}
+
+function* specifiers(text, file = '') {
+  let code = text;
+  const hits = []; // fallback matches: { spec, index }
+  if (SFC_EXT.test(file)) {
+    const ranges = scriptRanges(text, file);
+    code = blank(text, ranges, true);
+    // Outside the scripts, only calls count (a Vue template can call require()).
+    hits.push(...patternHits(blank(text, ranges, false), 0, CALL_PATTERNS));
+  }
+  const { tokens: ts, unsure } = tokens(code);
+  for (const r of unsure) hits.push(...patternHits(code.slice(r.start, r.end), r.start, FALLBACK_PATTERNS));
   const aliases = new Set(['require']);
   for (let i = 0; i < ts.length; i++) {
     if (ts[i + 1]?.value !== '=') continue;
@@ -217,8 +355,17 @@ function* specifiers(text) {
         j += 2; break;
       }
     }
-    // Each token is visited a bounded number of times, even for malformed declarations.
-    i = Math.max(i, j - 1);
+    // Resume at the token that ended the declaration. If that is "(", resume one earlier:
+    // TypeScript's `import x = require('y')` puts a require call inside the declaration.
+    // Each token is still visited a bounded number of times, even for malformed declarations.
+    i = Math.max(i, ts[j]?.value === '(' ? j - 2 : j - 1);
+  }
+  // Fallback matches, with their line numbers counted in one pass over the text.
+  hits.sort((a, b) => a.index - b.index);
+  let line = 1, pos = 0;
+  for (const hit of hits) {
+    for (; pos < hit.index; pos++) if (text.charCodeAt(pos) === 10) line++;
+    yield { name: packageNameFromSpecifier(hit.spec), line };
   }
 }
 
@@ -244,7 +391,7 @@ export function findImports(projectDirArg, { workspaces = [] } = {}) {
     const rel = relative(ctx.realRoot, file).split(sep).join('/');
     const kind = isTestPath(rel, workspaceRoots) ? 'test' : 'runtime';
     const text = readFileSync(file, 'utf8');
-    for (const { name, line } of specifiers(text)) {
+    for (const { name, line } of specifiers(text, rel)) {
       if (!name) continue;
       if (!found.has(name)) found.set(name, { runtime: [], test: [] });
       const where = found.get(name)[kind];

@@ -30,6 +30,10 @@ test('reads the partial versions and hyphen ranges real advisories use', () => {
     ['14.2.29', '>=13.0 <14.2.30', true], ['13.0.0', '>=13.0 <14.2.30', true], ['15.5.28', '>=13.0 <14.2.30', false],
     ['5.10.9', '>0 <=5.10.9', true], ['0.9.0', '>0 <=5.10.9', false], ['8.9.3', '>0 <=5.10.9', false],
     ['1.1.0', '1.0.0 - 1.2.0', true], ['1.3.0', '1.0.0 - 1.2.0', false],
+    // npm audit's rule (semver with includePrerelease): a partial lower bound covers the
+    // prereleases of that version, and a partial upper bound stops before the next one's.
+    ['1.0.0-alpha.4', '>0 <=5.10.9', true], ['0.0.0-experimental', '>=0', true], ['1.0.0-rc.1', '1.0.0 - 1.2.0', true],
+    ['2.0.0-beta.1', '<2', false], ['2.0.0-beta.1', '1.x', false], ['1.0.0-rc.1', '>=1.0.0', false],
   ]) assert.equal(satisfies(version, range), inside, `${version} in ${range}`);
 });
 

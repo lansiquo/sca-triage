@@ -117,7 +117,10 @@ export async function triage(projectDir, { advisoryLookup = fetchAdvisories, ver
   const copiesByName = new Map();
   for (const i of project.installs) copiesByName.set(i.name, (copiesByName.get(i.name) || 0) + 1);
 
-  const warnings = sources.skipped.map((file) => `${file} is larger than ${MAX_FILE_BYTES / 1e6} MB, so its imports were not read: packages it loads may rank too low`);
+  const warnings = [
+    ...project.warnings,
+    ...sources.skipped.map((file) => `${file} is larger than ${MAX_FILE_BYTES / 1e6} MB, so its imports were not read: packages it loads may rank too low`),
+  ];
   const findings = [];
   // First pass: which installs an advisory affects. Then look up published versions for
   // those packages (each name once, a few at a time) before building the findings.

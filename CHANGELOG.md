@@ -21,11 +21,16 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   dependencies, including packages imported without being declared, hoisted copies and workspaces.
   A test folder that links to source code no longer makes that code test-only. Files over 2 MB,
   which aren't read, are named in a warning. Long import lists and files with many imports no
-  longer slow the scan down quadratically.
+  longer slow the scan down quadratically. In `.vue`, `.svelte` and `.astro` files only the script
+  blocks are read as code, and text the scanner can't read reliably is searched for imports
+  anyway, so it leans toward "loaded".
 - **Lockfile and advisory checks.** A malformed lockfile, one missing a declared dependency, an
   entry whose name or version doesn't match its registry tarball, or an advisory with a missing or
   unknown severity is now an error (exit 2) instead of a quieter scan. Lockfiles written with
-  `--legacy-peer-deps` and `file:` folders outside the project still load.
+  `--legacy-peer-deps` and `file:` folders outside the project still load. A git, file or URL
+  dependency with no version in the lockfile is skipped with a warning.
+- **Pre-release versions.** Advisory ranges are matched the way `npm audit` matches them, so a
+  pre-release such as `1.0.0-alpha.4` is inside `>0 <=5.10.9`.
 - **Option values.** `fix --min-priority --dry-run`, with the value missing, took `--dry-run` as the
   priority and applied the upgrades. A missing value or unknown priority is now a usage error
   before anything runs.
@@ -56,7 +61,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - MIT license, and package metadata for the npm page: author, repository, homepage and issue
   tracker. ARCHITECTURE.md, CHANGELOG.md and SECURITY.md are in the package.
 - Regression tests for each fix, tests that run `fix` with real npm against a local registry, a
-  packed-package check, and CI on Node 20, 22 and 24 on Linux, macOS and Windows.
+  packed-package check, and CI on Node 20, 22 and 24 on Linux, macOS and Windows. CI also runs the
+  GitHub Action itself on a clean project and on a vulnerable one.
 
 ## [1.2.2] - 2026-11-09
 

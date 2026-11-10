@@ -68,22 +68,27 @@ function matchesComparator(version, comparator) {
   }
 }
 
-// True if `version` is inside `range`. Ranges are OR-ed sets of AND-ed comparators. Real
-// advisories also use partial versions (">=13.0 <14.2.30", ">0 <=5.10.9"), which npm reads as
-// ">=13.0.0" and ">=1.0.0"; anything unreadable throws.
+// True if `version` is inside the advisory `range`. Ranges are OR-ed sets of AND-ed
+// comparators. Real advisories also use partial versions (">=13.0 <14.2.30", ">0 <=5.10.9").
+// They are read the way npm audit reads them (semver's includePrerelease mode), so a partial
+// lower bound also covers that version's prereleases. Anything unreadable throws.
 export function satisfies(version, range) {
   const r = String(range).trim();
   if (r === '' || r === '*') return true;
-  return r.split('||').some((set) => comparators(set).every((c) => matchesComparator(version, c)));
+  return r.split('||').some((set) => comparators(set, true).every((c) => matchesComparator(version, c)));
 }
 
 // One "||" alternative -> plain comparators: operators joined to their versions (">= 1.0.0"),
 // hyphen ranges ("1.0.0 - 1.2.0"), and each token expanded (partial versions, ^, ~, x).
-function comparators(set) {
+function comparators(set, prereleases = false) {
   const t = set.trim();
   const hyphen = t.match(/^(\S+)\s+-\s+(\S+)$/);
-  if (hyphen) return [...expand(`>=${hyphen[1]}`), ...expand(`<=${hyphen[2]}`)];
-  return t.replace(/(<=|>=|<|>|=|~|\^)\s+/g, '$1').split(/\s+/).filter(Boolean).flatMap(expand);
+  if (hyphen) {
+    // With prereleases, "1.0.0 - 1.2.0" starts at 1.0.0's prereleases, as in semver.
+    const from = prereleases && /^v?\d+\.\d+\.\d+$/.test(hyphen[1]) ? [`>=${hyphen[1]}-0`] : expand(`>=${hyphen[1]}`, prereleases);
+    return [...from, ...expand(`<=${hyphen[2]}`, prereleases)];
+  }
+  return t.replace(/(<=|>=|<|>|=|~|\^)\s+/g, '$1').split(/\s+/).filter(Boolean).flatMap((token) => expand(token, prereleases));
 }
 
 // Registry keys are untrusted: " 1.0.1\n" parses, so the trimmed form is what callers get.
@@ -116,30 +121,33 @@ export function acceptsVersion(spec, version) {
   }
 }
 
-// One spec token -> plain comparators ("^1.2.3" -> [">=1.2.3", "<2.0.0"]).
-function expand(token) {
+// One spec token -> plain comparators ("^1.2.3" -> [">=1.2.3", "<2.0.0-0"]), following
+// semver: an upper bound made from a partial version or ^ / ~ ends just before the next
+// version's prereleases ("-0"), and with `prereleases` a partial lower bound starts at them.
+function expand(token, prereleases = false) {
   const m = /^(<=|>=|<|>|=|~|\^)?v?(\d+|[xX*])(?:\.(\d+|[xX*]))?(?:\.(\d+|[xX*]))?(-[0-9A-Za-z.-]+)?$/.exec(token);
   if (!m) throw new Error(`unsupported range: "${token}"`);
   const [, op = '', a, b, c, pre = ''] = m;
   const wild = (v) => v === undefined || /^[xX*]$/.test(v);
   const [M, m1, p] = [a, b, c].map((v) => (wild(v) ? null : Number(v)));
-  if (M === null) return op === '<' || op === '>' ? ['<0.0.0'] : [];
+  const z = prereleases ? '-0' : '';
+  if (M === null) return op === '<' || op === '>' ? ['<0.0.0-0'] : [];
   if (op === '^') {
-    const lo = `>=${M}.${m1 ?? 0}.${p ?? 0}${pre}`;
-    if (M > 0 || m1 === null) return [lo, `<${M + 1}.0.0`];
-    if (m1 > 0 || p === null) return [lo, `<0.${m1 + 1}.0`];
-    return [lo, `<0.0.${p + 1}`];
+    const lo = `>=${M}.${m1 ?? 0}.${p ?? 0}${p === null ? z : pre}`;
+    if (M > 0 || m1 === null) return [lo, `<${M + 1}.0.0-0`];
+    if (m1 > 0 || p === null) return [lo, `<0.${m1 + 1}.0-0`];
+    return [lo, `<0.0.${p + 1}-0`];
   }
-  if (op === '~') return m1 === null ? [`>=${M}.0.0`, `<${M + 1}.0.0`] : [`>=${M}.${m1}.${p ?? 0}${pre}`, `<${M}.${m1 + 1}.0`];
+  if (op === '~') return m1 === null ? [`>=${M}.0.0${z}`, `<${M + 1}.0.0-0`] : [`>=${M}.${m1}.${p ?? 0}${p === null ? z : pre}`, `<${M}.${m1 + 1}.0-0`];
   if (m1 === null || p === null) {
     // x-range or partial version: "1", "1.2", "1.x"
     const lo = `${M}.${m1 ?? 0}.0`;
     const hi = m1 === null ? `${M + 1}.0.0` : `${M}.${m1 + 1}.0`;
-    if (op === '' || op === '=') return [`>=${lo}`, `<${hi}`];
-    if (op === '>=' ) return [`>=${lo}`];
-    if (op === '<') return [`<${lo}`];
-    if (op === '>') return [`>=${hi}`];
-    if (op === '<=') return [`<${hi}`];
+    if (op === '' || op === '=') return [`>=${lo}${z}`, `<${hi}-0`];
+    if (op === '>=') return [`>=${lo}${z}`];
+    if (op === '<') return [`<${lo}-0`];
+    if (op === '>') return [`>=${hi}${z}`];
+    if (op === '<=') return [`<${hi}-0`];
   }
   return [`${op === '' ? '=' : op}${M}.${m1}.${p}${pre}`];
 }

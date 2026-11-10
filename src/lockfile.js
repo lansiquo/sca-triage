@@ -57,7 +57,7 @@ function validateManifest(value, label) {
   if (!object(value)) throw new Error(`${label} must be an object`);
   for (const [field] of MANIFEST_FIELDS) {
     if (value[field] === undefined) continue;
-    if (!object(value[field]) || Object.values(value[field]).some((v) => typeof v !== 'string' || !v)) {
+    if (!object(value[field]) || Object.values(value[field]).some((v) => typeof v !== 'string')) {
       throw new Error(`${label}.${field} must contain dependency specifications`);
     }
   }
@@ -88,7 +88,8 @@ function tarballMismatch(entry, realName) {
   } catch {
     return true;
   }
-  return name !== realName || m[2] !== `${name.split('/').pop()}-${entry.version}`;
+  const noBuild = (v) => String(v).replace(/\+[^+]*$/, ''); // "1.0.0+build" ships as x-1.0.0.tgz
+  return name !== realName || noBuild(m[2]) !== `${name.split('/').pop()}-${noBuild(entry.version)}`;
 }
 
 export function loadProject(dir) {
@@ -104,11 +105,21 @@ export function loadProject(dir) {
   if (!object(lock) || ![2, 3].includes(lock.lockfileVersion) || !object(lock.packages) || !object(lock.packages[''])) {
     throw new Error('package-lock.json must be a v2/v3 lockfile with a packages object and root entry; regenerate it with npm install --package-lock-only');
   }
+  // Installed entries with no usable version. From the registry that is an error: npm would
+  // install the tarball while the scan skipped it. A git, file or URL dependency can lack a
+  // version (its package.json has none); it can't be matched to advisories, so it is skipped
+  // with a warning.
+  const unversioned = new Set();
+  const warnings = [];
   for (const [path, entry] of Object.entries(lock.packages)) {
     if (!safePath(path)) throw new Error(`unsupported lockfile path ${path}`);
     validateManifest(entry, `lockfile entry ${path || '(root)'}`);
     if (path.includes('node_modules/') && !entry.link && (typeof entry.version !== 'string' || !parse(entry.version))) {
-      throw new Error(`lockfile entry ${path} has an invalid or missing version`);
+      if (typeof entry.resolved !== 'string' || TARBALL.test(entry.resolved)) {
+        throw new Error(`lockfile entry ${path} has an invalid or missing version`);
+      }
+      unversioned.add(path);
+      warnings.push(`${path} has no version in package-lock.json (a git, file or URL dependency), so it was not checked for advisories`);
     }
     if (entry.link && (typeof entry.resolved !== 'string' || !safePath(entry.resolved) || !object(lock.packages[entry.resolved]) || lock.packages[entry.resolved].link)) {
       throw new Error(`lockfile link ${path} has an unsupported or missing target`);
@@ -145,7 +156,7 @@ export function loadProject(dir) {
   const byPath = new Map();
   for (const [path, entry] of Object.entries(lock.packages)) {
     if (!path || !path.includes('node_modules/') || !entry || typeof entry !== 'object' || entry.link) continue;
-    if (!entry.version) continue;
+    if (!entry.version || unversioned.has(path)) continue;
     const name = nameFromPath(path);
     const item = {
       name,
@@ -201,11 +212,22 @@ export function loadProject(dir) {
   // legacy-peer-deps. A file: dependency outside the project gets no installs of its own.
   const missingAllowed = (entry, name) => Object.hasOwn(entry.optionalDependencies || {}, name)
     || Object.hasOwn(entry.peerDependencies || {}, name);
+  // Whether a dependency resolves to an entry that is locked but not scanned (no version).
+  const lockedUnscanned = (fromPath, name) => {
+    for (let base = fromPath; ;) {
+      if (unversioned.has(`${base ? base + '/' : ''}node_modules/${name}`)) return true;
+      const i = base.lastIndexOf('/node_modules/');
+      if (!base) return false;
+      base = i === -1 ? '' : base.slice(0, i);
+    }
+  };
   for (const [path, item] of byPath) {
     const entry = manifestData.get(path) || lock.packages[path];
     for (const name of item.dependsOn) {
       const next = resolve(path, name);
-      if (!next && !outside(path) && !missingAllowed(entry, name)) throw new Error(`incomplete lockfile: ${path || '(root)'} requires missing dependency ${name}`);
+      if (!next && !outside(path) && !missingAllowed(entry, name) && !lockedUnscanned(path, name)) {
+        throw new Error(`incomplete lockfile: ${path || '(root)'} requires missing dependency ${name}`);
+      }
       if (next) item.dependencyPaths.push(next.path);
     }
   }
@@ -250,7 +272,7 @@ export function loadProject(dir) {
       const hit = resolve(owner, name);
       const manifest = manifestData.get(owner);
       if (!hit) {
-        if (!missingAllowed(manifest, name)) throw new Error(`incomplete lockfile: ${owner || '(root)'} requires missing dependency ${name}`);
+        if (!missingAllowed(manifest, name) && !lockedUnscanned(owner, name)) throw new Error(`incomplete lockfile: ${owner || '(root)'} requires missing dependency ${name}`);
         continue;
       }
       for (const [field, declaredKind] of MANIFEST_FIELDS) {
@@ -289,5 +311,5 @@ export function loadProject(dir) {
     item.via = [...(reachedBy.get(item.path) || [])].sort();
   }
 
-  return { dir, name: pkg.name || '(unnamed)', pkg, direct, workspaces, installs, byPath, resolveDependency: resolve };
+  return { dir, name: pkg.name || '(unnamed)', pkg, direct, workspaces, installs, byPath, resolveDependency: resolve, warnings };
 }

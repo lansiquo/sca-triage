@@ -10,7 +10,7 @@
 - **Fix plans:** dependency types and alias identities are preserved. Overrides keep existing rules and are checked against every installed copy they reach before anything changes; an upgrade that would change other copies is listed for a manual upgrade instead. After installing, `fix` checks the lockfile and rolls back if npm installed anything other than the plan. Unconfirmed candidate targets are excluded from automatic fixes.
 - **npm:** `fix` installs with `--ignore-scripts`, always uses the system `git` (a project's `.npmrc` can't substitute another program), and refuses any npm argument that isn't a plain package name, version or path. npm still reads the project's `.npmrc` for registry and auth settings, so run `fix` only on projects you trust.
 - **GitHub Action:** workflow commands are stopped while the scan prints, so names from the scanned project can't add annotations or other commands to the log.
-- **Source scanning:** symlinks are followed only inside the project, and imports are tokenized in a linear pass, including long declarations. Evidence is deduplicated with sets.
+- **Source scanning:** symlinks are followed only inside the project, and imports are tokenized in a linear pass, including long declarations. Text the tokenizer can't read reliably is searched with bounded patterns, so unusual syntax counts as "loaded" rather than hiding an import. Evidence is deduplicated with sets.
 
 `fix` runs the project's own `npm test` before and after upgrading, so use it only on projects whose tests you trust.
 

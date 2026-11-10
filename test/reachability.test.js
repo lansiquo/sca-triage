@@ -75,10 +75,44 @@ test('stays linear on hostile input (no ReDoS)', (t) => {
   writeFileSync(join(dir, 'a.js'), 'import '.repeat(size / 7));
   writeFileSync(join(dir, 'b.js'), 'export '.repeat(size / 7));
   writeFileSync(join(dir, 'c.js'), 'require( /* '.repeat(size / 12));
+  // One line of regex starts that never end, and of quotes whose partner is escaped.
+  writeFileSync(join(dir, 'd.js'), '(/['.repeat(size / 3));
+  writeFileSync(join(dir, 'e.js'), "'" + "\\'".repeat(size / 2));
+  writeFileSync(join(dir, 'f.vue'), '<script>'.repeat(size / 8));
   const started = process.hrtime.bigint();
   findImports(dir);
   const ms = Number(process.hrtime.bigint() - started) / 1e6;
   assert.ok(ms < 1000, `took ${ms.toFixed(0)} ms`);
+});
+
+// Each of these hid the require from the scanner: the quote or "/*" inside a regular
+// expression, or an apostrophe in JSX or HTML text, was read as the start of a string or comment.
+test('finds imports after regular expressions, JSX text and HTML text that contain quotes', (t) => {
+  const dir = tempProject(t);
+  const files = {
+    'regex-quote.js': "const re = /'/;\nconst x = require('vuln');\n",
+    'regex-class.js': "const re = /[\"'/]/g;\nconst x = require('vuln');\n",
+    'regex-same-line.js': "if (/'/.test(s)) require('vuln');\n",
+    'regex-comment-start.js': "const p = s.replace(/^\\/*/, '');\nconst x = require('vuln');\n/** doc */\n",
+    'regex-two-slashes.js': "const ok = /\\/\\//.test(u) && require('vuln');\n",
+    'jsx-text.jsx': "const a = <p>Don't</p>;\nconst x = require('vuln');\n",
+    'jsx-same-line.jsx': "const a = <p>Don't {require('vuln')}</p>;\n",
+    'template-text.vue': "<template>\n  <p>Don't click ` here</p>\n</template>\n<script>\nimport x from 'vuln'\n</script>\n",
+    'template-call.vue': "<template><img :src=\"require('vuln')\"></template>\n",
+    'front.astro': "---\nimport x from 'vuln';\n---\n<p>It's fine</p>\n",
+    'import-equals.ts': "import fs = require('vuln');\n",
+    'division.js': "const a = b / c; const d = e / f;\nconst x = require('vuln');\n",
+    'open-template.js': "const x = require('vuln');\nconst t = `never closed\nconst y = require('later');\n",
+  };
+  for (const [name, text] of Object.entries(files)) writeFileSync(join(dir, name), text);
+  writeFileSync(join(dir, 'comment.js'), "// const y = require('commented');\n/* import z from 'commented' */\nconst s = \"require('in-string')\";\n");
+  const imports = findImports(dir);
+  const found = new Set(imports.get('vuln').runtime.map((loc) => loc.split(':')[0]));
+  assert.deepEqual([...found].sort(), Object.keys(files).sort());
+  assert.ok(imports.get('later'), 'text after an unclosed template literal is still searched');
+  assert.equal(imports.has('commented'), false);
+  assert.equal(imports.has('in-string'), false);
+  assert.deepEqual(imports.get('vuln').runtime.filter((loc) => loc.startsWith('template-text.vue')), ['template-text.vue:5']);
 });
 
 test('files count by their real location, and files too large to read are reported', (t) => {

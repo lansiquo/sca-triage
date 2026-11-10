@@ -224,7 +224,8 @@ exists, and it is flagged in the plan and the report.
 
 - **npm projects** with `package-lock.json` v2 or v3 (npm 7+). A v1 lockfile is rejected with a
   message to regenerate it. A malformed lockfile, one missing a required dependency, or an entry
-  whose name or version doesn't match its registry tarball is rejected. Missing optional and peer
+  whose name or version doesn't match its registry tarball is rejected. A git, file or URL
+  dependency with no version is skipped with a warning. Missing optional and peer
   dependencies are allowed (npm skips peers with `legacy-peer-deps`), and so are `file:` folders
   outside the project.
 - **Import-level reachability.** "Imported" means your code loads the package, not that the

@@ -109,6 +109,22 @@ test('lockfiles real npm writes still load: peers left out by legacy-peer-deps, 
   assert.equal(loadProject(linked).installs.length, 0);
 });
 
+test('valid lockfiles that look unusual still load: empty specs, build metadata, a git dependency with no version', (t) => {
+  const tgz = (file) => `https://registry.npmjs.org/x/-/${file}.tgz`;
+  const any = project(t, { dependencies: { x: '' } }, { 'node_modules/x': { version: '1.0.0', resolved: tgz('x-1.0.0'), dependencies: { y: '' } }, 'node_modules/y': { version: '1.0.0' } });
+  assert.equal(loadProject(any).installs.length, 2);
+  const build = project(t, { dependencies: { x: '1.0.0' } }, { 'node_modules/x': { version: '1.0.0+build.5', resolved: tgz('x-1.0.0') } });
+  assert.equal(loadProject(build).installs[0].version, '1.0.0+build.5');
+  // Not from the registry and no version: it can't be matched to advisories, so it is skipped with a warning.
+  const git = project(t, { dependencies: { a: '1.0.0' } }, { 'node_modules/a': { version: '1.0.0', dependencies: { g: 'github:o/r' } },
+    'node_modules/g': { resolved: 'git+ssh://git@github.com/o/r.git#0123456789abcdef0123456789abcdef01234567' } });
+  const loaded = loadProject(git);
+  assert.deepEqual(loaded.installs.map((i) => i.name), ['a']);
+  assert.match(loaded.warnings[0], /node_modules\/g has no version/);
+  // From the registry and no version stays an error: npm would install it unscanned.
+  assert.throws(() => loadProject(project(t, { dependencies: { x: '1.0.0' } }, { 'node_modules/x': { resolved: tgz('x-1.0.0') } })), /invalid or missing version/);
+});
+
 test('an entry whose name or version is not what its registry tarball contains is rejected', (t) => {
   const tgz = 'https://registry.npmjs.org/x/-/x-1.0.0.tgz';
   for (const entry of [{ version: '1.0.1', resolved: tgz }, { name: 'not-x', version: '1.0.0', resolved: tgz }]) {
