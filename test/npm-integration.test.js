@@ -15,7 +15,7 @@ const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 // npm_config_dry_run, which would make every install here a no-op).
 const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^npm_/i.test(k)));
 
-test('F02/F03/F04: real npm preserves declarations and alias identities, and leaves two-target overrides alone', async (t) => {
+test('F02/F03/F04: real npm preserves declarations and alias identities, leaves two-target overrides alone, overrides only what the direct upgrades leave vulnerable, and holds majors', async (t) => {
   const root = mkdtempSync(join(tmpdir(), 'sca-npm-integration-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const cache = join(root, 'cache'), tarballs = new Map();
@@ -24,7 +24,10 @@ test('F02/F03/F04: real npm preserves declarations and alias identities, and lea
     { name: 'parent', version: '1.0.0', dependencies: { x: '1.0.0' } },
     { name: 'parent', version: '2.0.0', dependencies: { x: '2.0.0' } },
     { name: 'left', version: '1.0.0', dependencies: { parent: '1.0.0' } },
-    { name: 'right', version: '1.0.0', dependencies: { parent: '2.0.0' } });
+    { name: 'right', version: '1.0.0', dependencies: { parent: '2.0.0' } },
+    { name: 'lib', version: '1.0.0', dependencies: { dep: '1.0.0' } }, { name: 'lib', version: '1.0.1', dependencies: { dep: '1.0.1' } },
+    { name: 'dep', version: '1.0.0' }, { name: 'dep', version: '1.0.1' }, { name: 'big', version: '1.0.0' }, { name: 'big', version: '2.0.0' });
+  const ranges = { x: '<1.0.1 || >=2.0.0 <2.0.1', alpha: '<1.0.1', beta: '<1.0.1', lib: '<1.0.1', dep: '<1.0.1', big: '<2.0.0' };
   for (const item of catalog) {
     const { name, version } = item;
     const dir = join(root, `${name}-${version}`); mkdirSync(dir);
@@ -41,7 +44,7 @@ test('F02/F03/F04: real npm preserves declarations and alias identities, and lea
     if (req.url.startsWith('/tar/')) { res.end(tarballs.get(req.url.slice(5))); return; }
     res.setHeader('content-type', 'application/json');
     if (req.method === 'POST') {
-      res.end(JSON.stringify(Object.fromEntries(['x', 'alpha', 'beta'].map((n) => [n, [{ severity: 'high', vulnerable_versions: n === 'x' ? '<1.0.1 || >=2.0.0 <2.0.1' : '<1.0.1', title: n }]])))); return;
+      res.end(JSON.stringify(Object.fromEntries(Object.entries(ranges).map(([n, range]) => [n, [{ severity: 'high', vulnerable_versions: range, title: n }]])))); return;
     }
     const name = req.url.slice(1);
     const versions = catalog.filter((item) => item.name === name);
@@ -111,15 +114,16 @@ test('F02/F03/F04: real npm preserves declarations and alias identities, and lea
   }
   assert.match(result.stdout, /Verified 2 of 2/);
 
-  const scoped = join(root, 'scoped'); mkdirSync(scoped);
-  json(join(scoped, 'package.json'), { name: 'scoped-app', version: '1.0.0', dependencies: { left: '1.0.0', right: '1.0.0' } });
-  await new Promise((resolve, reject) => {
-    const child = spawn(npm, ['install', '--ignore-scripts'], { cwd: scoped, shell: process.platform === 'win32',
+  const npmInstall = (cwd) => new Promise((resolve, reject) => {
+    const child = spawn(npm, ['install', '--ignore-scripts'], { cwd, shell: process.platform === 'win32',
       env: { ...env, npm_config_registry: url, npm_config_cache: cache, npm_config_audit: 'false', npm_config_fund: 'false' } });
     let output = '';
     child.stdout.on('data', (d) => { output += d; }); child.stderr.on('data', (d) => { output += d; });
     child.on('error', reject); child.on('close', (code) => code === 0 ? resolve() : reject(new Error(output)));
   });
+  const scoped = join(root, 'scoped'); mkdirSync(scoped);
+  json(join(scoped, 'package.json'), { name: 'scoped-app', version: '1.0.0', dependencies: { left: '1.0.0', right: '1.0.0' } });
+  await npmInstall(scoped);
   const manifestBefore = readFileSync(join(scoped, 'package.json'), 'utf8');
   const lockBefore = readFileSync(join(scoped, 'package-lock.json'), 'utf8');
   // x@1.0.0 under parent@1 and x@2.0.0 under parent@2 need different targets. One "parent" key
@@ -130,4 +134,16 @@ test('F02/F03/F04: real npm preserves declarations and alias identities, and lea
   assert.match(scopedResult.stdout, /Needs a manual upgrade[\s\S]*x 1\.0\.0 -> 1\.0\.1: the override "parent" > "x" would need several versions/);
   assert.equal(readFileSync(join(scoped, 'package.json'), 'utf8'), manifestBefore);
   assert.equal(readFileSync(join(scoped, 'package-lock.json'), 'utf8'), lockBefore);
+  // lib@1.0.1 brings dep@1.0.1 itself, so the planned "dep" override is not written; big's
+  // only fix is a major upgrade, which waits for --allow-major.
+  const stages = join(root, 'stages'); mkdirSync(stages);
+  json(join(stages, 'package.json'), { name: 'stages-app', version: '1.0.0', dependencies: { lib: '1.0.0', big: '1.0.0' } });
+  await npmInstall(stages);
+  const staged = await run(stages);
+  assert.equal(staged.code, 0, JSON.stringify(staged));
+  const stagedPkg = JSON.parse(readFileSync(join(stages, 'package.json')));
+  assert.deepEqual(stagedPkg.dependencies, { big: '1.0.0', lib: '1.0.1' });
+  assert.equal(stagedPkg.overrides, undefined);
+  assert.match(staged.stdout, /Not needed after the direct upgrades, so no override was written: dep/);
+  assert.match(staged.stdout, /Major upgrades, not applied without --allow-major[^\n]*\n  big 1\.0\.0 -> 2\.0\.0/);
 });

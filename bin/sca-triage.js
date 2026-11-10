@@ -5,13 +5,13 @@
 import { resolve, join } from 'node:path';
 import { writeFileSync, readFileSync, existsSync, lstatSync, mkdirSync } from 'node:fs';
 import { triage, gateFails } from '../src/triage.js';
-import { planFixes, applyFixes, pinCommands } from '../src/fix.js';
-import { formatTable, formatMarkdown, formatTestsLine, displayName, plain, lineStart, formatBundled, formatManual } from '../src/report.js';
+import { planFixes, applyFixes, pinCommands, targetLabel } from '../src/fix.js';
+import { formatTable, formatMarkdown, formatTestsLine, displayName, plain, lineStart, formatBundled, formatManual, formatMajor } from '../src/report.js';
 
 const HELP = `Usage:
   sca-triage scan [dir] [--json] [--markdown <file>] [--fail-on P1|P2|P3|none]
-  sca-triage plan [dir] [--min-priority P1|P2|P3]
-  sca-triage fix  [dir] [--min-priority P1|P2|P3] [--evidence <dir>] [--no-tests]
+  sca-triage plan [dir] [--min-priority P1|P2|P3] [--allow-major]
+  sca-triage fix  [dir] [--min-priority P1|P2|P3] [--allow-major] [--evidence <dir>] [--no-tests]
   sca-triage --version
 
 scan   Find known vulnerabilities in the dependency tree locked in
@@ -20,10 +20,13 @@ scan   Find known vulnerabilities in the dependency tree locked in
        it works as a CI gate. --json prints the full result; --markdown writes
        the findings table to a file.
 plan   Dry run: show the smallest safe upgrade for each finding (all
-       priorities unless --min-priority is set). Changes nothing.
+       priorities unless --min-priority is set). Changes nothing. Major
+       upgrades are listed, and planned only with --allow-major.
 fix    Apply those upgrades, run "npm test", rescan, and write an evidence
-       folder. Exit code 1 when the tests fail after the upgrade. If an install
-       fails, the manifests and package-lock.json are restored (exit code 2).
+       folder. Direct dependencies are upgraded first; overrides are written
+       only for copies still vulnerable after that. Exit code 1 when the tests
+       fail after the upgrade. If an install fails, the manifests and
+       package-lock.json are restored (exit code 2).
        "fix --dry-run" is the same as "plan".
 
 Priorities:
@@ -44,6 +47,7 @@ function parseArgs(argv) {
     else if (a === '--apply') opts.apply = true; // accepted for compatibility: fix always applies
     else if (a === '--dry-run') opts.dryRun = true;
     else if (a === '--no-tests') opts.noTests = true;
+    else if (a === '--allow-major') opts.allowMajor = true;
     else if (['--fail-on', '--min-priority', '--evidence', '--markdown'].includes(a)) {
       const value = argv[++i];
       if (!value || value.startsWith('-')) throw new Error(`${a} requires a value`);
@@ -74,8 +78,8 @@ async function main() {
   const dir = resolve(dirArg || '.');
   const allowed = {
     scan: new Set(['json', 'markdown', 'fail-on']),
-    plan: new Set(['min-priority', 'dryRun']),
-    fix: new Set(['min-priority', 'dryRun', 'apply', 'evidence', 'noTests']),
+    plan: new Set(['min-priority', 'dryRun', 'allowMajor']),
+    fix: new Set(['min-priority', 'dryRun', 'apply', 'evidence', 'noTests', 'allowMajor']),
   };
   if (!Object.hasOwn(allowed, command)) throw new Error(`unknown command "${command}" (try --help)`);
   for (const key of Object.keys(opts)) {
@@ -103,9 +107,10 @@ async function main() {
     }
     if (opts.dryRun && opts.apply) throw new Error('--dry-run and --apply cannot be combined');
     const minPriority = opts['min-priority'] || 'P3';
+    const allowMajor = Boolean(opts.allowMajor);
     if (dryRun) {
       const result = await triage(dir);
-      const plan = planFixes(result, { minPriority });
+      const plan = planFixes(result, { minPriority, allowMajor });
       if (!plan.actions.length) process.stdout.write('Nothing to upgrade.\n');
       for (const a of plan.actions) {
         const how = [
@@ -121,7 +126,10 @@ async function main() {
         );
       }
       for (const f of plan.unfixable) process.stdout.write(lineStart(`${displayName(f)}@${f.version}: ${f.fix.verified === false && f.fix.target ? 'candidate target is unverified; review manually' : 'no fixed version published yet'}`) + '\n');
-      for (const line of [...formatManual(plan.manual), ...formatBundled(plan.bundled)]) process.stdout.write(line + '\n');
+      for (const line of [...formatManual(plan.manual), ...formatMajor(plan.major), ...formatBundled(plan.bundled)]) process.stdout.write(line + '\n');
+      if (plan.actions.some((a) => a.pins.length) && plan.actions.some((a) => a.overrides.length)) {
+        process.stdout.write('Overrides are planned again after the direct upgrades: fix writes only those still needed.\n');
+      }
       for (const w of result.warnings || []) process.stderr.write(`warning: ${plain(w)}\n`);
       process.stdout.write('\nDry run: nothing was changed. Run "sca-triage fix" to apply these upgrades.\n');
       return 0;
@@ -136,9 +144,12 @@ async function main() {
       mkdirSync(join(dir, 'evidence'), { recursive: true });
       writeFileSync(join(dir, 'evidence', '.gitignore'), '*\n');
     }
-    const r = await applyFixes(dir, { minPriority, evidenceDir, runTests: !opts.noTests });
-    process.stdout.write(`Verified ${r.verification.confirmed.length} of ${r.plan.actions.length} upgrade target(s):\n${r.changes.map((c) => `  ${plain(c)}`).join('\n')}\n`);
-    for (const line of [...formatManual(r.plan.manual), ...formatBundled(r.plan.bundled)]) process.stdout.write(line + '\n');
+    const r = await applyFixes(dir, { minPriority, allowMajor, evidenceDir, runTests: !opts.noTests });
+    // A pinned package can also get an override for a nested copy: one target, counted once.
+    const targets = new Set(r.plan.actions.map(targetLabel));
+    process.stdout.write(`Verified ${new Set(r.verification.confirmed).size} of ${targets.size} upgrade target(s):\n${r.changes.map((c) => `  ${plain(c)}`).join('\n')}\n`);
+    if (r.plan.notNeeded.length) process.stdout.write(`Not needed after the direct upgrades, so no override was written: ${plain(r.plan.notNeeded.join(', '))}\n`);
+    for (const line of [...formatManual(r.plan.manual), ...formatMajor(r.plan.major), ...formatBundled(r.plan.bundled)]) process.stdout.write(line + '\n');
     for (const w of new Set([...(r.before.warnings || []), ...(r.after.warnings || [])])) process.stderr.write(`warning: ${plain(w)}\n`);
     process.stdout.write(`${formatTestsLine(r)}\n`);
     process.stdout.write(`After: ${r.after.findings.length} vulnerable packages (P1: ${r.after.summary.P1}, P2: ${r.after.summary.P2}, P3: ${r.after.summary.P3})\n`);

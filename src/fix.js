@@ -68,7 +68,9 @@ function installSpec(f, target) {
 // ("parent@1.0.0"). A key covers every version of the parent and its whole subtree, so an
 // action whose overrides would also change copies outside it, or that needs two targets under
 // one key, is not applied: it is returned in `manual` with the reason.
-export function planFixes(result, { minPriority = 'P3' } = {}) {
+// A major upgrade (another release line under npm's caret rules) can break callers, so it is
+// returned in `major` and applied only with `allowMajor`.
+export function planFixes(result, { minPriority = 'P3', allowMajor = false } = {}) {
   if (!['P1', 'P2', 'P3'].includes(minPriority)) throw new Error('--min-priority must be one of P1, P2, P3');
   const threshold = priorityRank(minPriority);
   const selected = result.findings.filter((f) => priorityRank(f.priority) >= threshold);
@@ -153,9 +155,10 @@ export function planFixes(result, { minPriority = 'P3' } = {}) {
       actions.push(action);
     }
   }
+  const major = allowMajor ? [] : actions.filter((a) => a.crossesMajor);
   const manual = [];
-  const planned = settle(actions, result.inventory, manual);
-  return { actions: planned, unfixable, bundled, manual };
+  const planned = settle(actions.filter((a) => !major.includes(a)), result.inventory, manual);
+  return { actions: planned, unfixable, bundled, manual, major };
 }
 
 // Split the actions into those that can be applied safely and those that need a manual
@@ -302,10 +305,21 @@ function editPins(projectDir, command) {
 
 const RESTORE_HINT = 'node_modules may still hold the partial install: run "npm ci" to match the restored lockfile';
 
+// "foo@1.0.1", or "foo (npm:lodash)@4.17.21" for an alias. A pinned package that also gets an
+// override for a nested copy has one target in two actions, so callers count labels, not actions.
+export function targetLabel(a) {
+  return `${a.name === a.package ? a.name : `${a.name} (npm:${a.package})`}@${a.target}`;
+}
+
 // `exec` replaces npm and `verifyInstall` the post-install check, for tests with a fake npm.
-export async function applyFixes(projectDir, { minPriority = 'P3', evidenceDir, runTests = true, lookups, exec, verifyInstall = verifyTargets } = {}) {
+export async function applyFixes(projectDir, { minPriority = 'P3', allowMajor = false, evidenceDir, runTests = true, lookups, exec, verifyInstall = verifyTargets } = {}) {
   const before = await triage(projectDir, lookups);
-  const plan = planFixes(before, { minPriority });
+  const plan = planFixes(before, { minPriority, allowMajor });
+  const pinActions = plan.actions.filter((a) => a.pins.length);
+  // Packages whose overrides are planned again after the direct upgrades (see step 2).
+  const recheck = new Set([...plan.actions.filter((a) => a.overrides.length), ...[...plan.manual.map((m) => m.action), ...plan.major].filter((a) => !a.pins.length)].map((a) => a.name));
+  let overrideStage = { findings: before.findings, actions: plan.actions.filter((a) => !a.pins.length) };
+  let { manual, major } = plan;
   const changes = [];
   const commandLogs = [];
   const npm = (args) => {
@@ -361,17 +375,29 @@ export async function applyFixes(projectDir, { minPriority = 'P3', evidenceDir, 
     }
 
     // 2) Copies nothing declares directly: npm overrides, then one install to apply them.
-    if (plan.actions.some((a) => a.overrides.length)) {
+    //    An upgraded package often brings a safe copy itself, and an override stays in
+    //    package.json for good, so after the direct upgrades the project is scanned again and
+    //    overrides are planned only for the copies that are still vulnerable.
+    if (pinActions.length && recheck.size) {
+      step = { command: 'rescan after the direct upgrades' };
+      const mid = await triage(projectDir, lookups);
+      const again = planFixes(mid, { minPriority, allowMajor });
+      const keep = (a) => !a.pins.length && recheck.has(a.name);
+      overrideStage = { findings: mid.findings, actions: again.actions.filter(keep) };
+      manual = [...plan.manual.filter((m) => m.action.pins.length), ...again.manual.filter((m) => keep(m.action))];
+      major = [...plan.major.filter((a) => a.pins.length), ...again.major.filter(keep)];
+    }
+    if (overrideStage.actions.some((a) => a.overrides.length)) {
       step = { command: 'write package.json overrides' };
       const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
-      const merged = applyOverrides(pkg.overrides, plan.actions);
+      const merged = applyOverrides(pkg.overrides, overrideStage.actions);
       pkg.overrides = merged.overrides;
       writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n');
       changes.push(...merged.changes);
       // npm keeps a locked copy that an override now rejects (it lists it as "invalid"), so
       // remove those lockfile entries and let the install resolve them under the overrides.
       step = { command: 'update package-lock.json' };
-      for (const c of dropStaleCopies(projectDir, lockPath, plan.actions)) {
+      for (const c of dropStaleCopies(projectDir, lockPath, overrideStage.actions)) {
         changes.push(`package-lock.json: re-resolve ${c.name}@${c.version} at ${c.path}`);
       }
       step = { command: 'npm install --ignore-scripts' };
@@ -379,16 +405,28 @@ export async function applyFixes(projectDir, { minPriority = 'P3', evidenceDir, 
       if (r.code !== 0) throw Object.assign(new Error(`npm install (overrides) failed:\n${r.output}`), { npmOutput: r.output });
     }
 
-    // 3) Before the tests: every package that used a planned copy must now get the target.
-    //    npm can quietly keep an old copy or resolve to another package; then nothing is kept.
+    // 3) Before the tests: every manifest that declared a pinned package, and every package
+    //    that used a copy an override targets, must now get the target. npm can quietly keep
+    //    an old copy or resolve to another package; then nothing is kept.
     step = { command: 'check the installed versions in package-lock.json' };
-    verification = verifyInstall(projectDir, before, plan);
+    verification = verifyInstall(projectDir, [
+      { findings: before.findings, actions: pinActions, directOnly: overrideStage.findings !== before.findings },
+      { findings: overrideStage.findings, actions: overrideStage.actions },
+    ]);
     if (verification.unresolved.length) {
       throw new Error(`npm did not install the planned version for ${verification.unresolved.join('; ')}`);
     }
   } catch (err) {
     throw rollback(err, { projectDir, evidenceDir, before, step, changes, snapshots, testsBefore });
   }
+
+  // What was left out: upgrades for a person, majors without --allow-major, and planned
+  // overrides that the direct upgrades made unnecessary.
+  const outcome = () => {
+    const left = new Set([...overrideStage.actions, ...manual.map((m) => m.action), ...major].filter((a) => !a.pins.length).map((a) => a.name));
+    const notNeeded = [...new Set(plan.actions.filter((a) => a.overrides.length).map((a) => a.name))].filter((name) => !left.has(name));
+    return { manual, major, notNeeded };
+  };
 
   // From this point onward, verification failures preserve applied changes and
   // always record their state. A registry outage is not a successful rescan.
@@ -404,7 +442,7 @@ export async function applyFixes(projectDir, { minPriority = 'P3', evidenceDir, 
         saveSnapshots(evidenceDir, 'after', snapshots.map(([file]) => [file, readFileSync(join(projectDir, file), 'utf8')]));
         writeFileSync(join(evidenceDir, 'package-lock.after.json'), readFileSync(lockPath, 'utf8'));
         writeFileSync(join(evidenceDir, 'verification-error.txt'), String(err.stack || err));
-        writeFileSync(join(evidenceDir, 'REPORT.md'), formatMarkdown(before, after, { changes, tests, testsBefore, testsSkipped, manual: plan.manual, verificationError: err.message }));
+        writeFileSync(join(evidenceDir, 'REPORT.md'), formatMarkdown(before, after, { changes, tests, testsBefore, testsSkipped, ...outcome(), verificationError: err.message }));
         note = `\nEvidence: ${evidenceDir}`;
       } catch (e) { note = `\nCould not finish writing evidence: ${e.message}`; }
     }
@@ -430,10 +468,10 @@ export async function applyFixes(projectDir, { minPriority = 'P3', evidenceDir, 
       verificationWarnings.push(`SBOM unavailable: ${err.message}`);
       writeFileSync(join(evidenceDir, 'sbom-error.txt'), String(err.message));
     }
-    writeFileSync(join(evidenceDir, 'REPORT.md'), formatMarkdown(before, after, { changes, tests, testsBefore, testsSkipped, manual: plan.manual, verificationWarnings }));
+    writeFileSync(join(evidenceDir, 'REPORT.md'), formatMarkdown(before, after, { changes, tests, testsBefore, testsSkipped, ...outcome(), verificationWarnings }));
   }
-  return { before, after, plan, changes, tests, testsBefore, testsSkipped, verification, verificationWarnings,
-    evidenceWritten: Boolean(evidenceDir && existsSync(evidenceDir)) };
+  return { before, after, plan: { ...plan, actions: [...pinActions, ...overrideStage.actions], ...outcome() }, changes, tests, testsBefore, testsSkipped,
+    verification, verificationWarnings, evidenceWritten: Boolean(evidenceDir && existsSync(evidenceDir)) };
 }
 
 function saveSnapshots(evidenceDir, stage, snapshots) {
@@ -447,13 +485,17 @@ function saveSnapshots(evidenceDir, stage, snapshots) {
 // For each action, every place that used one of its copies: the manifests that declare it and
 // the packages that require it (found again by name and version, since npm may move them).
 // Each must now resolve to the target, as the same registry package.
-function verifyTargets(projectDir, before, plan) {
+// `stages` are { findings, actions, directOnly }: the findings the actions were planned from.
+// With `directOnly`, only the declaring manifests are checked: the overrides for the other
+// copies were planned again after the pins, and are checked in their own stage.
+function verifyTargets(projectDir, stages) {
   const project = loadProject(projectDir);
   const unresolved = [], confirmed = [];
-  for (const action of plan.actions) {
+  for (const { findings, actions, directOnly } of stages) for (const action of actions) {
     const origins = new Set();
-    for (const f of before.findings.filter((x) => action.paths.includes(x.path))) {
+    for (const f of findings.filter((x) => action.paths.includes(x.path))) {
       if (f.direct) for (const d of f.declaredBy || []) origins.add(d.owner);
+      if (directOnly) continue;
       for (const r of f.requiredEdges || []) {
         if (r.by === action.name) continue;
         for (const i of project.installs) if (i.name === r.by && i.version === r.version && !i.inBundle) origins.add(i.path);
@@ -464,8 +506,8 @@ function verifyTargets(projectDir, before, plan) {
       const got = project.resolveDependency(origin, action.name);
       return !got || got.realName !== action.package || got.version !== action.target;
     });
-    if (wrong.length) unresolved.push(`${action.name}@${action.target} (still different under ${wrong.map((o) => o || 'the project root').join(', ')})`);
-    else confirmed.push(`${action.name}@${action.target}`);
+    if (wrong.length) unresolved.push(`${targetLabel(action)} (still different under ${wrong.map((o) => o || 'the project root').join(', ')})`);
+    else confirmed.push(targetLabel(action));
   }
   return { confirmed, unresolved };
 }

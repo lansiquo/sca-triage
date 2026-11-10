@@ -209,6 +209,22 @@ test('F13: importing a hoisted transitive package reaches its descendants', asyn
   assert.match(r.findings[0].evidence[0], /via inner/);
 });
 
+test('a production dependency named in a string counts as loaded; a dev-only package loaded only by a config file does not', async (t) => {
+  const dir = project(t, { dependencies: { ejs: '1.0.0', pug: '1.0.0' }, devDependencies: { vite: '1.0.0', devstr: '1.0.0' } }, {
+    'node_modules/ejs': { version: '1.0.0' }, 'node_modules/pug': { version: '1.0.0' },
+    'node_modules/vite': { version: '1.0.0', dev: true }, 'node_modules/devstr': { version: '1.0.0', dev: true },
+  });
+  writeFileSync(join(dir, 'server.js'), "app.set('view engine', 'ejs');\nconst label = 'devstr';\n");
+  writeFileSync(join(dir, 'vite.config.js'), "import { defineConfig } from 'vite';\n");
+  writeFileSync(join(dir, 'app.config.js'), "module.exports = require('pug');\n"); // a production package: runtime code
+  const high = { ghsa: 'G-test', severity: 'high', vulnerableVersions: '<1.0.1' };
+  const r = await triage(dir, { advisoryLookup: async () => ({ ejs: [high], pug: [high], vite: [high], devstr: [high] }), versionLookup: async () => ['1.0.1'] });
+  assert.deepEqual(r.findings.map((f) => [f.package, f.reachability, f.priority, f.evidence.join()]).sort(), [
+    ['devstr', 'not-imported', 'P2', ''], ['ejs', 'named', 'P1', 'server.js:1'],
+    ['pug', 'imported', 'P1', 'app.config.js:1'], ['vite', 'config-only', 'P2', 'vite.config.js:1'],
+  ]);
+});
+
 test('F14: one workspace cannot lend import evidence to another installed copy', async (t) => {
   const dir = project(t, { workspaces: ['packages/*'] }, {
     'packages/a': { name: 'a', dependencies: { x: '1.0.1' } }, 'packages/b': { name: 'b', dependencies: { x: '1.0.0' } },

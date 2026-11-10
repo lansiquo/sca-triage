@@ -2,8 +2,10 @@
 
 const LEVEL_LABEL = {
   imported: 'imported by your code',
+  named: 'named in your code',
   'via-imported': 'pulled in by an imported dependency',
   'test-only': 'test code only',
+  'config-only': 'build config only',
   'not-imported': 'not imported',
 };
 
@@ -66,6 +68,15 @@ export function formatManual(manual = []) {
   return [
     'Needs a manual upgrade (fix can\'t change only these copies):',
     ...manual.map(({ action: a, reason }) => `  ${plain(displayName({ package: a.package, installedAs: a.name }))} ${plain([...new Set(a.from)].join(', '))} -> ${a.target}: ${plain(reason)}`),
+  ];
+}
+
+// Plan and fix output: major upgrades left out unless --allow-major is set.
+export function formatMajor(major = []) {
+  if (!major.length) return [];
+  return [
+    'Major upgrades, not applied without --allow-major (review the release notes first):',
+    ...major.map((a) => `  ${plain(displayName({ package: a.package, installedAs: a.name }))} ${plain([...new Set(a.from)].join(', '))} -> ${a.target}`),
   ];
 }
 
@@ -152,9 +163,17 @@ export function formatMarkdown(before, after, extras = {}) {
   if (extras.changes?.length) {
     out.push('', '## Changes applied', '', ...extras.changes.map((c) => `- ${codeSpan(c)}`));
   }
+  if (extras.notNeeded?.length) {
+    out.push('', `Planned overrides not needed after the direct upgrades, so not written: ${extras.notNeeded.map((n) => codeSpan(n)).join(', ')}.`);
+  }
+  const copyLabel = (a) => codeSpan(`${displayName({ package: a.package, installedAs: a.name })}@${[...new Set(a.from)].join(', ')}`);
   if (extras.manual?.length) {
     out.push('', '## Needs a manual upgrade', '', '`fix` can\'t change only these copies, so it left them as they are:', '',
-      ...extras.manual.map(({ action: a, reason }) => `- ${codeSpan(`${displayName({ package: a.package, installedAs: a.name })}@${[...new Set(a.from)].join(', ')}`)} -> ${escapeMarkdown(a.target)}: ${escapeMarkdown(reason)}`));
+      ...extras.manual.map(({ action: a, reason }) => `- ${copyLabel(a)} -> ${escapeMarkdown(a.target)}: ${escapeMarkdown(reason)}`));
+  }
+  if (extras.major?.length) {
+    out.push('', '## Major upgrades not applied', '', 'These cross a major version. Review the release notes, then run `fix` with `--allow-major` to apply them:', '',
+      ...extras.major.map((a) => `- ${copyLabel(a)} -> ${escapeMarkdown(a.target)}`));
   }
   if (extras.verificationError) {
     out.push('', '## Verification FAILED: applied changes preserved', '',

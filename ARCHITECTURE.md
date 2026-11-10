@@ -9,7 +9,7 @@ flowchart TD
     LOCK --> SRC["Import evidence from the project's source<br/>runtime or test code"]
     ADV --> VER["Published versions of each vulnerable package<br/>8 lookups at a time"]
     VER --> PICK["Smallest safe target per copy<br/>targets re-checked, up to 5 rounds"]
-    SRC --> RANK["Rank P1–P3<br/>severity × imported / via-imported / test-only / not imported"]
+    SRC --> RANK["Rank P1–P3<br/>severity × imported / named / via-imported /<br/>config-only / test-only / not imported"]
     PICK --> RANK
     RANK --> GATE{"scan: a finding at or<br/>above --fail-on?"}
     GATE -- yes --> E1["exit 1"]
@@ -18,7 +18,8 @@ flowchart TD
     PLAN --> FIX
     subgraph FIX["fix (src/fix.js)"]
         T0["npm test: baseline"] --> PIN["npm install name@target --save-exact<br/>one per manifest and dependency type"]
-        PIN --> OV["Write overrides, drop stale nested<br/>lock entries, npm install"]
+        PIN --> MID["Rescan: plan overrides only for<br/>copies still vulnerable"]
+        MID --> OV["Write overrides, drop stale nested<br/>lock entries, npm install"]
         OV --> CHK["Check the new lockfile:<br/>every planned copy at its target"]
         CHK --> T1["npm test again"]
         T1 --> RE["Rescan"]
@@ -57,9 +58,9 @@ The GitHub Action runs `scan` only.
 
 ## Ranking
 
-Each copy gets a reachability level: `imported` (runtime code requires the copy it resolves to), `via-imported` (a package the runtime code imports leads to it), `test-only` or `not-imported`. Priority combines that with the highest advisory severity:
+Each copy gets a reachability level: `imported` (runtime code requires the copy it resolves to), `named` (runtime code has a string that is exactly the name of a direct production dependency, as in `app.set('view engine', 'ejs')`), `via-imported` (an imported or named package leads to it), `config-only` (a development-only package that only `*.config.*` files load, such as `vite.config.js`), `test-only` or `not-imported`. A config file that loads a production package counts as runtime code. Priority combines the level with the highest advisory severity:
 
-| | Imported or via an imported dependency | Test-only or not imported |
+| | Imported, named, or via an imported dependency | Config-only, test-only or not imported |
 |---|---|---|
 | Critical or high | P1 | P2 |
 | Moderate | P2 | P3 |
@@ -74,11 +75,12 @@ The JSON inventory includes the installed nodes and dependency paths used to che
 
 ## Upgrade planning
 
-- **Target.** The smallest published, non-prerelease version above the installed one that no known advisory covers, on the same release line when one exists (same major, or same `0.minor` below 1.0.0). A target on another line is flagged as a major upgrade.
+- **Target.** The smallest published, non-prerelease version above the installed one that no known advisory covers, on the same release line when one exists (same major, or same `0.minor` below 1.0.0). A target on another line is a major upgrade: `plan` and `fix` list it, and apply it only with `--allow-major`.
 - **Re-checks.** The registry only returns advisories for the versions it is asked about, so each new candidate target is looked up too: one batched request per round, up to 5 rounds, picking again until no target changes. A target still unconfirmed after 5 rounds is displayed with a warning and excluded from automatic fixes.
 - **Direct dependencies** are pinned with `npm install name@target --save-exact`, grouped into one install per manifest (root or workspace) and dependency type. Optional and peer declarations keep their kinds; multiple declarations are edited in place before install.
 - **Other copies** get npm `overrides`: one global entry when every installed copy is in the plan, wants the same target and none is a direct dependency; otherwise entries scoped to the packages that require each copy, by name. A package whose range excludes a pinned target (for example `express` requiring `body-parser` 1.18.3) gets a scoped override too. Keys are plain names because npm 10 does not reliably apply version-qualified keys (`"parent@1.0.0"`).
 - **Manual upgrades.** An override applies to every version of its parent and to that parent's whole subtree. Before anything is installed, each override is checked against every installed copy it would reach: a copy outside the plan may only be moved up to the target on the same release line. An upgrade whose override would change anything else, or that needs two versions under one key, is not applied; `plan` and `fix` list it under "Needs a manual upgrade" with the reason, and the rest are applied. A dependency declared by a local `file:` package that is not a workspace is listed the same way, since `npm install --workspace` can't reach it.
+- **Two stages.** `fix` installs the pins first, rescans, and plans the overrides again from the new tree, for the packages the first plan overrode, left for a manual upgrade or held as majors. Overrides are written only for copies that are still vulnerable, since an upgraded dependency often brings safe copies itself and an override stays in `package.json` for good. The install check then confirms the pins in their declaring manifests and the overrides in the packages that use those copies.
 - **Stale copies.** npm keeps a locked nested copy that an override rejects and lists it as invalid. Before the overrides install, `fix` removes the lock entries of every nested copy an override covers that is not at the override's version, so npm resolves them again.
 - **Bundled copies** ship inside the tarball of the package above them, which npm overrides cannot change. They get no pin or override; `scan` shows "bundled in <package>: upgrade <package>", and `plan` and `fix` list them grouped by that package. A copy bundled by the project itself is fixed normally.
 - **Scope.** All priorities are planned unless `--min-priority` narrows it.

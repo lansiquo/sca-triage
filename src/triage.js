@@ -86,7 +86,9 @@ const VERSION_LOOKUP_CONCURRENCY = 8;
 
 export async function triage(projectDir, { advisoryLookup = fetchAdvisories, versionLookup = fetchVersions } = {}) {
   const project = loadProject(projectDir);
-  const sources = findImports(projectDir, { workspaces: project.workspaces });
+  // Production dependencies the code may load by name (a view engine set with app.set).
+  const prodNames = new Set(project.installs.filter((i) => i.declaredBy.some((d) => d.kind !== 'dev')).map((i) => i.name));
+  const sources = findImports(projectDir, { workspaces: project.workspaces, names: prodNames });
   const imports = resolveImports(project, sources);
   // Advisories and versions are looked up by the real package name ("lodash" for
   // "foo": "npm:lodash@..."); reachability uses the installed name.
