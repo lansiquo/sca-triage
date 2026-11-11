@@ -79,6 +79,9 @@ test('stays linear on hostile input (no ReDoS)', (t) => {
   writeFileSync(join(dir, 'd.js'), '(/['.repeat(size / 3));
   writeFileSync(join(dir, 'e.js'), "'" + "\\'".repeat(size / 2));
   writeFileSync(join(dir, 'f.vue'), '<script>'.repeat(size / 8));
+  // Comments that might be JSX text, each one a reason to search the rest of the file.
+  writeFileSync(join(dir, 'g.jsx'), '>a/*<*/'.repeat(size / 7));
+  writeFileSync(join(dir, 'h.jsx'), '}//{\n'.repeat(size / 5));
   const started = process.hrtime.bigint();
   findImports(dir);
   const ms = Number(process.hrtime.bigint() - started) / 1e6;
@@ -113,6 +116,43 @@ test('finds imports after regular expressions, JSX text and HTML text that conta
   assert.equal(imports.has('commented'), false);
   assert.equal(imports.has('in-string'), false);
   assert.deepEqual(imports.get('vuln').runtime.filter((loc) => loc.startsWith('template-text.vue')), ['template-text.vue:5']);
+});
+
+// "/*" or "//" in JSX text is text, not a comment. Read as a comment, it hid every import up to
+// the next "*/" (or the end of the line), and the tokenizer could resume inside a string or
+// template literal that it then misread.
+test('finds imports after "/*" or "//" in JSX text', (t) => {
+  const dir = tempProject(t);
+  const files = {
+    'glob.jsx': "const C = () => <code>src/*.js</code>;\nconst L = lazy(() => import('vuln'));\n/** doc */\nfunction f(){}\n",
+    'glob-url.jsx': "const A = () => <a href=\"/docs\">docs/*</a>;\nexport default A;\nconst B = () => import('vuln');\n/* trailing */\n",
+    'glob.js': "const C = () => <code>src/*.js</code>;\nconst x = require('vuln');\n/* end */\n",
+    'glob-static.tsx': "const C = () => <p>{n}/*</p>;\nimport x from 'vuln';\n/* end */\n",
+    'glob-same-line.jsx': "const C = () => <p>a/*</p>; require('vuln'); /* b */\n",
+    'glob-template.jsx': "const C = () => <p>a/*</p>;\nconst t = `*/`;\nconst x = require('vuln');\nconst u = `b`;\n",
+    'url.jsx': "const A = () => <p>http://example.com</p>; const x = require('vuln');\n",
+    'url-template.jsx': "const A = () => <p>http://example.com</p>; const t = `\n`; const x = require('vuln'); const u = `\n`;\n",
+  };
+  for (const [name, text] of Object.entries(files)) writeFileSync(join(dir, name), text);
+  // Real comments still don't count, in JSX and around it.
+  writeFileSync(join(dir, 'comments.jsx'), [
+    "// const a = require('commented');",
+    "/* const b = require('commented'); */",
+    'function f() {',
+    "  /* require('commented') */ return <div>{/* import('commented') */}<p>a /* b */ c</p></div>; // import('commented')",
+    '}',
+    '/**',
+    " * require('commented')",
+    ' */',
+    "const ok = require('plain');",
+    '',
+  ].join('\n'));
+  const imports = findImports(dir);
+  const found = new Set((imports.get('vuln')?.runtime ?? []).map((loc) => loc.split(':')[0]));
+  assert.deepEqual([...found].sort(), Object.keys(files).sort());
+  assert.deepEqual(imports.get('vuln').runtime.filter((loc) => loc.startsWith('glob.jsx')), ['glob.jsx:2']);
+  assert.equal(imports.has('commented'), false);
+  assert.deepEqual(imports.get('plain')?.runtime, ['comments.jsx:9']);
 });
 
 test('files count by their real location, and files too large to read are reported', (t) => {
