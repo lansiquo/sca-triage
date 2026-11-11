@@ -186,7 +186,8 @@ function regexEnd(text, i) {
 // returned in `unsure` as { start, end } ranges for the fallback patterns:
 //   - a line with a quote that has no partner on it, or a "/" that looks like the start of a
 //     regular expression but never ends (an apostrophe in JSX text, unusual syntax);
-//   - everything after a comment or template literal that is never closed.
+//   - everything after a comment or template literal that is never closed;
+//   - everything after a comment that might be JSX text (see mayBeJsxText).
 function tokens(text) {
   const out = [];
   const unsure = [];
@@ -201,13 +202,27 @@ function tokens(text) {
     oddLine = line;
     unsure.push({ start: text.lastIndexOf('\n', i - 1) + 1, end: lineEnd(i) });
   };
+  // "/*" and "//" in JSX text (<code>src/*.js</code>, <p>http://x</p>) are text. JSX text
+  // contains none of { } < >, so it can only start after a ">" or "}", and it can only hide
+  // code if the "comment" runs past its end, a "<" or "{". Such a comment is read as one, and
+  // the rest of the file also goes to the fallback, since the tokenizer may resume inside a
+  // string or template literal. The last { } < > is tracked in one forward pass.
+  let mark = '', markPos = 0, restUnsure = false;
+  const mayBeJsxText = (start, end) => {
+    if (restUnsure) return;
+    for (; markPos < start; markPos++) if ('{}<>'.includes(text[markPos])) mark = text[markPos];
+    if ((mark !== '>' && mark !== '}') || !/[<{]/.test(text.slice(start, end))) return;
+    restUnsure = true;
+    unsure.push({ start, end: text.length });
+  };
   for (let i = 0; i < text.length;) {
     const c = text[i];
     if (/\s/.test(c)) { if (c === '\n') line++; i++; continue; }
-    if (text.startsWith('//', i)) { i = lineEnd(i); continue; }
+    if (text.startsWith('//', i)) { const end = lineEnd(i); mayBeJsxText(i, end); i = end; continue; }
     if (text.startsWith('/*', i)) {
       const close = text.indexOf('*/', i + 2);
       if (close === -1) { unsure.push({ start: i, end: text.length }); break; }
+      mayBeJsxText(i, close);
       for (let k = i; k < close; k++) if (text[k] === '\n') line++;
       i = close + 2;
       continue;
