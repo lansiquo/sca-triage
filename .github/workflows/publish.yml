@@ -222,8 +222,10 @@ jobs:
 
           # The registry's integrity for this version, or "absent" when the registry says the version
           # does not exist. Any other answer is an error: it must not lead to a publish or a pass.
+          # Both reads before a publish use an empty cache, so npm cannot answer from an older copy
+          # when the registry does not answer.
           status=0
-          view="$(npm view "${PACKAGE_NAME}@${VERSION}" dist.integrity --json)" || status=$?
+          view="$(npm view "${PACKAGE_NAME}@${VERSION}" dist.integrity --json --cache "$(mktemp -d)")" || status=$?
           on_npm="$(VIEW="$view" STATUS="$status" node -e '
             const { VIEW, STATUS } = process.env;
             let data;
@@ -235,31 +237,37 @@ jobs:
           ')" || fail "Could not tell from the registry whether ${PACKAGE_NAME}@${VERSION} is published."
 
           if [[ "$on_npm" == "absent" ]]; then
-            # latest must never move backwards: a version lower than npm's latest is not published.
-            # Empty means the package is not on the registry at all; any other odd answer is an error.
+            # latest must never move backwards. The version is published only after it has been compared
+            # with npm's latest, which must be a readable X.Y.Z that is one of the published versions.
+            # Any other answer is an error, "package not found" too: this workflow does not publish a
+            # package for the first time.
             status=0
-            view="$(npm view "$PACKAGE_NAME" dist-tags.latest --json)" || status=$?
+            view="$(npm view "$PACKAGE_NAME" dist-tags.latest versions --json --cache "$(mktemp -d)")" || status=$?
             latest="$(VIEW="$view" STATUS="$status" node -e '
               const { VIEW, STATUS } = process.env;
               let data;
               try { data = JSON.parse(VIEW); } catch {}
-              if (STATUS === "0" && typeof data === "string" && /^[0-9A-Za-z.+-]+$/.test(data)) console.log(data);
-              else if (STATUS !== "0" && data?.error?.code === "E404") console.log("");
-              else process.exit(1);
-            ')" || fail "Could not read the latest version of ${PACKAGE_NAME} from the registry. Nothing was published."
-            if [[ -n "$latest" ]]; then
-              [[ "$latest" =~ ^${semver}$ ]] ||
-                fail "latest on npm is ${latest}, which is not X.Y.Z, so ${VERSION} cannot be compared with it. Nothing was published."
-              current=("${BASH_REMATCH[@]:1}")
-              [[ "$VERSION" =~ ^${semver}$ ]] || fail "The version is not X.Y.Z without leading zeros."
-              new=("${BASH_REMATCH[@]:1}")
-              for i in 0 1 2; do
-                if (( new[i] > current[i] )); then break; fi
-                if (( new[i] < current[i] )); then
-                  fail "${VERSION} is lower than ${latest}, the latest version on npm, and would become latest. Nothing was published."
-                fi
-              done
-            fi
+              const latest = data?.["dist-tags.latest"];
+              const versions = [].concat(data?.versions ?? []);
+              const readable = typeof latest === "string" && /^[0-9A-Za-z.+-]+$/.test(latest);
+              if (STATUS !== "0" || !readable || !versions.includes(latest)) process.exit(1);
+              console.log(latest);
+            ')" ||
+              fail "Could not read a valid latest version of ${PACKAGE_NAME} from the registry, so ${VERSION} cannot be compared with it. Nothing was published."
+            [[ "$latest" =~ ^${semver}$ ]] ||
+              fail "latest on npm is ${latest}, which is not X.Y.Z, so ${VERSION} cannot be compared with it. Nothing was published."
+            current=("${BASH_REMATCH[@]:1}")
+            [[ "$VERSION" =~ ^${semver}$ ]] || fail "The version is not X.Y.Z without leading zeros."
+            new=("${BASH_REMATCH[@]:1}")
+            order=same
+            for i in 0 1 2; do
+              if (( new[i] > current[i] )); then order=higher; break; fi
+              if (( new[i] < current[i] )); then order=lower; break; fi
+            done
+            [[ "$order" != "lower" ]] ||
+              fail "${VERSION} is lower than ${latest}, the latest version on npm, and would become latest. Nothing was published."
+            [[ "$order" == "higher" ]] ||
+              fail "The registry says ${VERSION} is not published, and also that it is the latest version. Nothing was published."
 
             npm publish "$TARBALL" --provenance --access public --ignore-scripts --tag latest
             echo "published=true" >> "$GITHUB_OUTPUT"
