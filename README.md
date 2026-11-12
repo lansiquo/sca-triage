@@ -270,17 +270,31 @@ the override.
 ## Releases
 
 Versions after 1.3.0 are published to npm from GitHub by the
-[publish workflow](.github/workflows/publish.yml), when their GitHub release is published. It
-publishes stable releases only: the tag must be `vX.Y.Z` (SemVer, no leading zeros) and match the
-version in `package.json`, drafts and prereleases are skipped, and a version lower than the latest
-one on npm is refused. Releases are published one at a time. The workflow packs the commit of the
-release tag and publishes that tarball with npm trusted publishing, so no npm token is stored, and
-with [provenance](https://docs.npmjs.com/generating-provenance-statements): npm shows the commit
-and the workflow run a version was built from.
+[publish workflow](.github/workflows/publish.yml), when their GitHub release is published. It packs
+the commit of the release tag and publishes that tarball with npm trusted publishing, so no npm
+token is stored, and with [provenance](https://docs.npmjs.com/generating-provenance-statements):
+npm shows the commit and the workflow run a version was built from. Releases are published one at
+a time.
 
-It then moves the `v1` tag to the release, only forwards and only for 1.x versions. If GitHub
-refuses that push, the job fails after the npm release is complete and prints the command that
-moves `v1` by hand.
+Drafts, prereleases and releases whose tag is not `vX.Y.Z` (SemVer, no leading zeros) are skipped.
+Publishing is refused, and the run fails with nothing published, when:
+
+- the tag no longer points at the commit of the release, or `package.json` has another name or
+  version than the tag;
+- npm on the runner is older than 11.5.1, a test fails, or the tests leave the checkout changed;
+- the registry does not say whether the version is published, or the version is already on npm
+  with other contents (with the same contents the run passes and publishes nothing);
+- npm's `latest` version cannot be read, is not `X.Y.Z`, is not one of the published versions, or
+  is not lower than the release. So an older version never becomes `latest`, and a package that is
+  not on npm yet cannot be published this way;
+- an earlier publication is still running after an hour.
+
+After publishing, the run fails if npm does not serve the same tarball as `latest` within three
+minutes.
+
+The workflow then moves the `v1` tag to the release, only forwards and only for 1.x versions. If
+GitHub refuses that push, the job fails after the npm release is complete and prints the command
+that moves `v1` by hand.
 
 ## More
 
