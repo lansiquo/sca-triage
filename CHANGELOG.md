@@ -7,6 +7,14 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-11-12
+
+Compatibility: gate results and `fix` command behavior can change in 1.3.0. Major upgrades
+are held unless `--allow-major` is passed; name-loaded production dependencies now count as
+loaded, and config-only development tools no longer rank P1. Consumers of JSON findings
+should accept the `named` and `config-only` reachability levels. Review gate expectations
+and planned upgrades before updating.
+
 ### Changed
 - `plan` and `fix` no longer apply major upgrades by default. They list them under "Major upgrades,
   not applied without --allow-major"; pass `--allow-major` to apply them. A project's tests were
@@ -196,7 +204,8 @@ fixed release) instead of 3.
 - GitHub Action (`lansiquo/sca-triage@v1`).
 - A lab app with known-vulnerable dependencies (`lab/`) to try it on (removed in 1.2.1).
 
-[Unreleased]: https://github.com/lansiquo/sca-triage/compare/v1.2.4...HEAD
+[Unreleased]: https://github.com/lansiquo/sca-triage/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/lansiquo/sca-triage/compare/v1.2.4...v1.3.0
 [1.2.4]: https://github.com/lansiquo/sca-triage/compare/v1.2.3...v1.2.4
 [1.2.3]: https://github.com/lansiquo/sca-triage/compare/v1.2.2...v1.2.3
 [1.2.2]: https://github.com/lansiquo/sca-triage/compare/v1.2.1...v1.2.2
