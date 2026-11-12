@@ -26,9 +26,10 @@ npm run test:pack
 - `npm test` runs every `test/*.test.js` with `node --test`. `test/npm-integration.test.js` runs
   `fix` with real npm against a registry it starts on this machine.
 - `npm run test:pack` packs the package, installs it in a throwaway project and runs it there. It
-  also checks the docs in the package, which are what npm shows: README commands in `bash` blocks
-  use `npx`, every pinned `@vX.Y.Z` matches `package.json`, the README usage block matches
-  `--help`, and CHANGELOG.md has an entry and a link for the version.
+  also checks the docs in the package, which are what npm shows: no README `bash` block runs the
+  tool from a clone path such as `node sca-triage/bin/sca-triage.js`, every pinned `@vX.Y.Z`
+  matches `package.json`, the README usage block matches `--help`, and CHANGELOG.md has an entry
+  and a link for the version.
 - CI runs both on Node.js 20, 22 and 24 on Linux, macOS and Windows. It also runs the GitHub Action
   itself on a clean project and on a vulnerable one.
 
