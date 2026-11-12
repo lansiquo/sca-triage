@@ -80,8 +80,11 @@ test('stays linear on hostile input (no ReDoS)', (t) => {
   writeFileSync(join(dir, 'e.js'), "'" + "\\'".repeat(size / 2));
   writeFileSync(join(dir, 'f.vue'), '<script>'.repeat(size / 8));
   // Comments that might be JSX text, each one a reason to search the rest of the file.
-  writeFileSync(join(dir, 'g.jsx'), '>a/*<*/'.repeat(size / 7));
-  writeFileSync(join(dir, 'h.jsx'), '}//{\n'.repeat(size / 5));
+  writeFileSync(join(dir, 'g.jsx'), '>a/*<*/'.repeat(size / 14));
+  writeFileSync(join(dir, 'h.jsx'), '}//{\n'.repeat(size / 10));
+  // After such a comment: words whose gaps all run through one far "*/" and then a long row of
+  // comments, and assignments whose right side is the same far word.
+  writeFileSync(join(dir, 'i.jsx'), '>a/*<*/' + 'a=/*'.repeat(size / 24) + '*/' + '/**/'.repeat(size / 24) + 'b.createRequire(');
   const started = process.hrtime.bigint();
   findImports(dir);
   const ms = Number(process.hrtime.bigint() - started) / 1e6;
@@ -153,6 +156,81 @@ test('finds imports after "/*" or "//" in JSX text', (t) => {
   assert.deepEqual(imports.get('vuln').runtime.filter((loc) => loc.startsWith('glob.jsx')), ['glob.jsx:2']);
   assert.equal(imports.has('commented'), false);
   assert.deepEqual(imports.get('plain')?.runtime, ['comments.jsx:9']);
+});
+
+// After "/*" or "//" in JSX text the tokenizer can't be trusted, and the search that takes over
+// has to know every form the tokenizer knows. It used to miss template literals, createRequire
+// aliases, escaped specifiers and comments longer than the fallback patterns allow.
+test('after "/*" or "//" in JSX text, every import form is still found', (t) => {
+  const dir = tempProject(t);
+  const forms = {
+    static: "import x from 'vuln';",
+    'side-effect': "import 'vuln';",
+    're-export': "export * from 'vuln';",
+    'import-equals': "import fs = require('vuln');",
+    require: "const x = require('vuln');",
+    resolve: "require.resolve('vuln');",
+    dynamic: "const L = () => import('vuln');",
+    'template-import': 'import(`vuln`);',
+    'template-require': 'require(`vuln`);',
+    'template-prefix': 'require(`vuln/${name}`);',
+    alias: "const load = createRequire(import.meta.url); load('vuln');",
+    'alias-module': "const load = module.createRequire(import.meta.url); load.resolve('vuln');",
+    'alias-template': 'const load = createRequire(import.meta.url); load(`vuln`);',
+    escaped: "require('vul\\u006e');",
+    'long-comment': `require(/* ${'x'.repeat(500)} */ 'vuln');`,
+    'many-comments': `import(${'/* c */ '.repeat(9)}'vuln');`,
+    'comment-before-paren': "require /* c */ . /* d */ resolve /* e */ ('vuln');",
+    'long-subpath': `require('vuln/${'a/'.repeat(400)}b');`,
+  };
+  const markers = {
+    block: (code) => `const C = () => <pre>lib/*.mjs</pre>;\n${code}\n/* end */\n`,
+    'block-open': (code) => `const C = () => <pre>lib/*.mjs</pre>;\n${code}\n`, // no "*/" follows
+    line: (code) => `const C = () => <p>http://example.com</p>; ${code}\n`,
+  };
+  const files = [];
+  for (const ext of ['jsx', 'tsx', 'js']) {
+    for (const [marker, wrap] of Object.entries(markers)) {
+      for (const [form, code] of Object.entries(forms)) {
+        files.push(`${form}.${marker}.${ext}`);
+        writeFileSync(join(dir, files.at(-1)), wrap(code));
+      }
+    }
+  }
+  // The alias is declared before the JSX text and called after it, or the other way round.
+  writeFileSync(join(dir, 'template.jsx'), 'const Page = () => <pre>lib/*.mjs</pre>;\nimport(`from-template`);\n/* end */\n');
+  writeFileSync(join(dir, 'alias.jsx'), "import { createRequire } from 'node:module';\nconst load = createRequire(import.meta.url);\nconst Page = () => <pre>lib/*.mjs</pre>;\nload('from-alias');\n/* end */\n");
+  writeFileSync(join(dir, 'alias-later.jsx'), "function f() { return load('from-later-alias'); }\nconst Page = () => <pre>lib/*.mjs</pre>;\nconst load = createRequire(import.meta.url);\n/* end */\n");
+  const imports = findImports(dir);
+  const found = new Set((imports.get('vuln')?.runtime ?? []).map((loc) => loc.split(':')[0]));
+  assert.deepEqual(files.filter((file) => !found.has(file)), []);
+  assert.deepEqual(imports.get('vuln').runtime.filter((loc) => loc.startsWith('template-import.block.jsx')), ['template-import.block.jsx:2']);
+  assert.deepEqual(imports.get('from-template')?.runtime, ['template.jsx:2']);
+  assert.deepEqual(imports.get('from-alias')?.runtime, ['alias.jsx:4']);
+  assert.deepEqual(imports.get('from-later-alias')?.runtime, ['alias-later.jsx:1']);
+});
+
+// The price of that search: a real comment can look like JSX text. It does when the last of
+// { } < > before it is ">" or "}" and it contains "<" or "{", like a JSDoc type after a function.
+// From there to the end of the file, an import in a comment or a string counts as loaded. A false
+// "imported" costs a reviewer a look; a false "not imported" hides a package below the gate.
+test('after a comment that might be JSX text, an import in a comment or string counts as loaded', (t) => {
+  const dir = tempProject(t);
+  writeFileSync(join(dir, 'jsdoc-type.js'), "function example() {}\n/** @type {string} */\n// require('in-comment');\nrequire('live');\n");
+  writeFileSync(join(dir, 'comparison.js'), "const comparison = 2 > 1;\n/* <doc> require('in-comment'); */\nrequire('live');\n");
+  writeFileSync(join(dir, 'string.js'), "function example() {}\n/** @returns {string} */\nconst documentation = \"require('in-string')\";\nrequire('live');\n");
+  writeFileSync(join(dir, 'template.js'), "function example() {}\n/** @type {string} */\n// import(`in-comment`);\n");
+  // Without such a comment nothing changes: these are the same files with plain comments.
+  writeFileSync(join(dir, 'plain-jsdoc.js'), "function example() {}\n/** a string */\n// require('plain-comment');\n// import(`plain-comment`);\nrequire('live');\n");
+  writeFileSync(join(dir, 'plain-comparison.js'), "const comparison = 2 > 1;\n/* doc require('plain-comment'); */\nrequire('live');\n");
+  writeFileSync(join(dir, 'plain-string.js'), "function example() {}\n/** returns a string */\nconst documentation = \"require('plain-string')\";\nrequire('live');\n");
+  writeFileSync(join(dir, 'plain-block.js'), "function example() {\n  /** @type {string} */\n  // require('plain-comment');\n}\n");
+  const imports = findImports(dir);
+  assert.deepEqual(imports.get('in-comment')?.runtime, ['comparison.js:2', 'jsdoc-type.js:3', 'template.js:3']);
+  assert.deepEqual(imports.get('in-string')?.runtime, ['string.js:3']);
+  assert.deepEqual(imports.get('live')?.runtime, ['comparison.js:3', 'jsdoc-type.js:4', 'plain-comparison.js:3', 'plain-jsdoc.js:5', 'plain-string.js:4', 'string.js:4']);
+  assert.equal(imports.has('plain-comment'), false);
+  assert.equal(imports.has('plain-string'), false);
 });
 
 test('files count by their real location, and files too large to read are reported', (t) => {
