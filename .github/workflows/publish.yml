@@ -1,5 +1,5 @@
-# Publishes a GitHub release to npm with trusted publishing (OIDC, no stored token) and provenance,
-# checks what the registry then serves, and moves the floating v1 tag to the release.
+# Publishes a stable GitHub release (tag vX.Y.Z) to npm with trusted publishing (OIDC, no stored token)
+# and provenance, checks what the registry then serves, and moves the floating v1 tag to the release.
 
 name: publish
 
@@ -9,9 +9,10 @@ on:
 
 permissions: {}
 
-# One publication at a time, in the order the releases were published.
+# One group per release, so a release never cancels another one that is waiting: a shared group
+# keeps a single waiting run and cancels the rest. The turn job puts the runs in order instead.
 concurrency:
-  group: npm-publish
+  group: npm-publish-${{ github.event.release.tag_name }}
   cancel-in-progress: false
 
 defaults:
@@ -36,22 +37,64 @@ jobs:
           RELEASE_PRERELEASE: ${{ github.event.release.prerelease }}
         run: |
           set -euo pipefail
+          semver='(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)' # SemVer core: no leading zeros
           publish=false
           if [[ "$RELEASE_DRAFT" != "false" ]]; then
             echo "::notice::Not publishing: the release is a draft."
           elif [[ "$RELEASE_PRERELEASE" != "false" ]]; then
             echo "::notice::Not publishing: the release is a prerelease."
-          elif [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::notice::Not publishing: the release tag is not vX.Y.Z."
+          elif [[ ! "$RELEASE_TAG" =~ ^v${semver}$ ]]; then
+            echo "::notice::Not publishing: the release tag is not vX.Y.Z without leading zeros."
           else
             publish=true
             echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
           fi
           echo "publish=$publish" >> "$GITHUB_OUTPUT"
 
+  # Publications run one at a time, in the order their runs started (a rerun starts again).
+  turn:
+    name: wait for earlier publications
+    needs: gate
+    if: needs.gate.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    permissions:
+      actions: read # to list the runs of this workflow
+    steps:
+      - name: Wait until no earlier run of this workflow is active
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          # Asks every 15 seconds for up to an hour. An answer that cannot be read counts as "wait".
+          waiting_for="an answer from GitHub"
+          for attempt in {1..240}; do
+            runs="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/publish.yml/runs?per_page=100")" || runs=
+            started="$(jq -r 'first(.workflow_runs[] | select(.id == (env.GITHUB_RUN_ID | tonumber)) | .run_started_at // empty)' <<< "$runs")" || started=
+            if [[ "$started" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
+              earlier="$(STARTED="$started" jq -r '
+                [.workflow_runs[]
+                  | select(.status != "completed" and .id != (env.GITHUB_RUN_ID | tonumber))
+                  | select([(.run_started_at // "9999"), .id] < [env.STARTED, (env.GITHUB_RUN_ID | tonumber)])
+                  | .id] | join(" ")' <<< "$runs")"
+              if [[ -z "$earlier" ]]; then
+                echo "No earlier run of this workflow is active."
+                exit 0
+              fi
+              waiting_for="run ${earlier// /, run }"
+            else
+              waiting_for="an answer from GitHub that lists this run"
+            fi
+            echo "Attempt ${attempt} of 240: waiting for ${waiting_for}."
+            sleep 15
+          done
+          echo "::error::Not published: after an hour this run is still waiting for ${waiting_for}. Re-run it when that has finished."
+          exit 1
+
   publish:
     name: publish to npm
-    needs: gate
+    needs: [gate, turn]
     if: needs.gate.outputs.publish == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -80,8 +123,9 @@ jobs:
         run: |
           set -euo pipefail
           fail() { echo "::error::$1"; exit 1; }
+          semver='(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)' # SemVer core: no leading zeros
 
-          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "The release tag is not vX.Y.Z."
+          [[ "$RELEASE_TAG" =~ ^v${semver}$ ]] || fail "The release tag is not vX.Y.Z without leading zeros."
           version="${RELEASE_TAG#v}"
 
           # Three views of the release commit must agree: this checkout, the tag as the repository
@@ -113,8 +157,9 @@ jobs:
           set -euo pipefail
           fail() { echo "::error::$1"; exit 1; }
 
+          semver='(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)' # SemVer core: no leading zeros
           npm_version="$(npm --version)"
-          [[ "$npm_version" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] ||
+          [[ "$npm_version" =~ ^${semver}$ ]] ||
             fail "Could not read the npm version: $(printf '%q' "$npm_version")."
           major="${BASH_REMATCH[1]}" minor="${BASH_REMATCH[2]}" patch="${BASH_REMATCH[3]}"
           if (( 10#$major < 11 || (10#$major == 11 && (10#$minor < 5 || (10#$minor == 5 && 10#$patch < 1))) )); then
@@ -173,6 +218,7 @@ jobs:
         run: |
           set -euo pipefail
           fail() { echo "::error::$1"; exit 1; }
+          semver='(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)' # SemVer core: no leading zeros
 
           # The registry's integrity for this version, or "absent" when the registry says the version
           # does not exist. Any other answer is an error: it must not lead to a publish or a pass.
@@ -189,6 +235,32 @@ jobs:
           ')" || fail "Could not tell from the registry whether ${PACKAGE_NAME}@${VERSION} is published."
 
           if [[ "$on_npm" == "absent" ]]; then
+            # latest must never move backwards: a version lower than npm's latest is not published.
+            # Empty means the package is not on the registry at all; any other odd answer is an error.
+            status=0
+            view="$(npm view "$PACKAGE_NAME" dist-tags.latest --json)" || status=$?
+            latest="$(VIEW="$view" STATUS="$status" node -e '
+              const { VIEW, STATUS } = process.env;
+              let data;
+              try { data = JSON.parse(VIEW); } catch {}
+              if (STATUS === "0" && typeof data === "string" && /^[0-9A-Za-z.+-]+$/.test(data)) console.log(data);
+              else if (STATUS !== "0" && data?.error?.code === "E404") console.log("");
+              else process.exit(1);
+            ')" || fail "Could not read the latest version of ${PACKAGE_NAME} from the registry. Nothing was published."
+            if [[ -n "$latest" ]]; then
+              [[ "$latest" =~ ^${semver}$ ]] ||
+                fail "latest on npm is ${latest}, which is not X.Y.Z, so ${VERSION} cannot be compared with it. Nothing was published."
+              current=("${BASH_REMATCH[@]:1}")
+              [[ "$VERSION" =~ ^${semver}$ ]] || fail "The version is not X.Y.Z without leading zeros."
+              new=("${BASH_REMATCH[@]:1}")
+              for i in 0 1 2; do
+                if (( new[i] > current[i] )); then break; fi
+                if (( new[i] < current[i] )); then
+                  fail "${VERSION} is lower than ${latest}, the latest version on npm, and would become latest. Nothing was published."
+                fi
+              done
+            fi
+
             npm publish "$TARBALL" --provenance --access public --ignore-scripts --tag latest
             echo "published=true" >> "$GITHUB_OUTPUT"
           elif [[ "$on_npm" == "$INTEGRITY" ]]; then
@@ -254,8 +326,9 @@ jobs:
         run: |
           set -euo pipefail
           fail() { echo "::error::$1"; exit 1; }
+          semver='(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)' # SemVer core: no leading zeros
 
-          [[ "$VERSION" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || fail "The published version is not X.Y.Z."
+          [[ "$VERSION" =~ ^${semver}$ ]] || fail "The published version is not X.Y.Z without leading zeros."
           new=("${BASH_REMATCH[@]:1}")
           [[ "$RELEASE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || fail "The published commit is not a full commit SHA."
           [[ "$(git rev-parse --verify HEAD)" == "$RELEASE_COMMIT" ]] || fail "The checkout is not the published commit."
@@ -274,7 +347,7 @@ jobs:
             old_version="$(git show "${old_commit}:package.json" |
               node -p 'JSON.parse(require("node:fs").readFileSync(0, "utf8")).version')" ||
               fail "Could not read package.json at v1 (${old_commit})."
-            [[ "$old_version" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] ||
+            [[ "$old_version" =~ ^${semver}$ ]] ||
               fail "package.json at v1 (${old_commit}) has no X.Y.Z version."
             old=("${BASH_REMATCH[@]:1}")
 
@@ -290,8 +363,11 @@ jobs:
             [[ "$order" == "newer" ]] ||
               fail "v1 is at ${old_commit}, another commit that is also version ${old_version}. Not moving it."
 
-            # Moves v1 only if it is still where it was just read.
-            git push --force-with-lease="refs/tags/v1:${old_ref}" origin "${RELEASE_COMMIT}:refs/tags/v1"
+            # Moves v1 only if it is still where it was just read. GitHub can refuse this push, for
+            # example when workflow files differ between the two commits. Nothing else is tried then.
+            move="git push --force-with-lease=refs/tags/v1:${old_ref} origin ${RELEASE_COMMIT}:refs/tags/v1"
+            git push --force-with-lease="refs/tags/v1:${old_ref}" origin "${RELEASE_COMMIT}:refs/tags/v1" ||
+              fail "${VERSION} is published on npm and verified, but v1 was not moved: the push was refused (see the lines above). Check v1, then move it by hand: ${move}"
           fi
 
           now="$(git ls-remote origin refs/tags/v1 'refs/tags/v1^{}' |
