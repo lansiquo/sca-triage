@@ -267,6 +267,14 @@ the override.
 - **Mirrors:** `SCA_TRIAGE_REGISTRY` points at another registry. It must be `https://`
   (`http://` only for this machine) with no credentials in the URL.
 
+## Releases
+
+Versions after 1.3.0 are published to npm from GitHub by the
+[publish workflow](.github/workflows/publish.yml), when their GitHub release is published. It packs
+the commit of the release tag and publishes that tarball with npm trusted publishing, so no npm
+token is stored, and with [provenance](https://docs.npmjs.com/generating-provenance-statements):
+npm shows the commit and the workflow run a version was built from.
+
 ## More
 
 - [SECURITY.md](SECURITY.md): how the tool treats untrusted input, and how to report an issue
