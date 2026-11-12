@@ -16,6 +16,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   forwards and only for 1.x versions; if GitHub refuses that push, the job fails and prints the
   command that moves `v1` by hand. [W-sca-triage-11]
 
+### Fixed
+- README: rewritten for new users. It opens with the problem and a quick start, says each thing
+  once instead of repeating this changelog, and corrects statements that were wrong: registry
+  responses are retried for 429, 500, 502, 503 and 504, for example, not for every 5xx. The
+  release checks and how to run from a clone moved to a new CONTRIBUTING.md, which also covers the
+  tests; internal detail moved to ARCHITECTURE.md. [W-sca-triage-13]
+
 ## [1.3.0] - 2026-11-12
 
 Compatibility: gate results and `fix` command behavior can change in 1.3.0. Major upgrades
