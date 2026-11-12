@@ -1,0 +1,304 @@
+# Publishes a GitHub release to npm with trusted publishing (OIDC, no stored token) and provenance,
+# checks what the registry then serves, and moves the floating v1 tag to the release.
+
+name: publish
+
+on:
+  release:
+    types: [published]
+
+permissions: {}
+
+# One publication at a time, in the order the releases were published.
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # Decides whether this release is published at all. The other jobs are skipped when it says no.
+  gate:
+    name: gate (stable vX.Y.Z releases only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      publish: ${{ steps.gate.outputs.publish }}
+      tag: ${{ steps.gate.outputs.tag }}
+    steps:
+      - name: Skip drafts, prereleases and tags that are not vX.Y.Z
+        id: gate
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_DRAFT: ${{ github.event.release.draft }}
+          RELEASE_PRERELEASE: ${{ github.event.release.prerelease }}
+        run: |
+          set -euo pipefail
+          publish=false
+          if [[ "$RELEASE_DRAFT" != "false" ]]; then
+            echo "::notice::Not publishing: the release is a draft."
+          elif [[ "$RELEASE_PRERELEASE" != "false" ]]; then
+            echo "::notice::Not publishing: the release is a prerelease."
+          elif [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::notice::Not publishing: the release tag is not vX.Y.Z."
+          else
+            publish=true
+            echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          fi
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+
+  publish:
+    name: publish to npm
+    needs: gate
+    if: needs.gate.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write # npm trusted publishing and provenance; there is no npm token
+    outputs:
+      commit: ${{ steps.release.outputs.commit }}
+      version: ${{ steps.release.outputs.version }}
+    env:
+      PACKAGE_NAME: sca-triage
+      RELEASE_TAG: ${{ needs.gate.outputs.tag }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: refs/tags/${{ needs.gate.outputs.tag }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: The checkout is the release commit, and package.json agrees with the tag
+        id: release
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$1"; exit 1; }
+
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "The release tag is not vX.Y.Z."
+          version="${RELEASE_TAG#v}"
+
+          # Three views of the release commit must agree: this checkout, the tag as the repository
+          # has it now (peeled when the tag is annotated), and the commit the release event named.
+          head="$(git rev-parse --verify HEAD)"
+          tag_commit="$(git ls-remote origin "refs/tags/${RELEASE_TAG}" "refs/tags/${RELEASE_TAG}^{}" |
+            awk -v ref="refs/tags/${RELEASE_TAG}" '
+              $2 == ref { direct = $1 }
+              $2 == ref "^{}" { peeled = $1 }
+              END { print (peeled != "" ? peeled : direct) }')"
+          event_commit="$(git rev-parse --verify --quiet "${GITHUB_SHA}^{commit}" || true)"
+          [[ -n "$tag_commit" && "$head" == "$tag_commit" ]] ||
+            fail "The checkout is at ${head}, but ${RELEASE_TAG} is at ${tag_commit:-no commit} in the repository."
+          [[ "$head" == "$event_commit" ]] ||
+            fail "The checkout is at ${head}, but the release event named ${GITHUB_SHA}."
+
+          name="$(node -p 'JSON.parse(require("node:fs").readFileSync("package.json", "utf8")).name')"
+          [[ "$name" == "$PACKAGE_NAME" ]] ||
+            fail "package.json name is $(printf '%q' "$name"), not ${PACKAGE_NAME}."
+          pkg_version="$(node -p 'JSON.parse(require("node:fs").readFileSync("package.json", "utf8")).version')"
+          [[ "$pkg_version" == "$version" ]] ||
+            fail "package.json version is $(printf '%q' "$pkg_version"), but the tag ${RELEASE_TAG} needs ${version}."
+
+          echo "commit=$head" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: npm is 11.5.1 or later (needed for trusted publishing)
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$1"; exit 1; }
+
+          npm_version="$(npm --version)"
+          [[ "$npm_version" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] ||
+            fail "Could not read the npm version: $(printf '%q' "$npm_version")."
+          major="${BASH_REMATCH[1]}" minor="${BASH_REMATCH[2]}" patch="${BASH_REMATCH[3]}"
+          if (( 10#$major < 11 || (10#$major == 11 && (10#$minor < 5 || (10#$minor == 5 && 10#$patch < 1))) )); then
+            fail "npm ${npm_version} is too old: trusted publishing needs npm 11.5.1 or later."
+          fi
+          echo "npm ${npm_version}"
+
+      - run: npm test
+      - run: npm run test:pack
+
+      - name: Pack once
+        id: pack
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$1"; exit 1; }
+
+          # What is packed must be the release commit: the tests may not leave anything behind.
+          if [[ -n "$(git status --porcelain --untracked-files=all --ignored)" ]]; then
+            git status --short --untracked-files=all --ignored
+            fail "The checkout no longer matches the release commit."
+          fi
+
+          export PACK_DIR="$RUNNER_TEMP/npm-pack"
+          mkdir "$PACK_DIR"
+          npm pack --ignore-scripts --json --pack-destination "$PACK_DIR" > "$PACK_DIR/pack.json"
+
+          # One tarball with the expected name and version; its integrity is computed from the file.
+          node -e '
+            const fs = require("node:fs");
+            const path = require("node:path");
+            const { PACK_DIR, PACKAGE_NAME, VERSION, GITHUB_OUTPUT } = process.env;
+            const packed = JSON.parse(fs.readFileSync(path.join(PACK_DIR, "pack.json"), "utf8"));
+            if (!Array.isArray(packed) || packed.length !== 1) throw new Error("npm pack did not report one tarball");
+            const [{ name, version, filename, integrity }] = packed;
+            if (name !== PACKAGE_NAME || version !== VERSION || filename !== PACKAGE_NAME + "-" + VERSION + ".tgz") {
+              throw new Error("npm pack reported " + JSON.stringify({ name, version, filename }));
+            }
+            const tarball = path.join(PACK_DIR, filename);
+            const sha512 = require("node:crypto").createHash("sha512").update(fs.readFileSync(tarball)).digest("base64");
+            const actual = "sha512-" + sha512;
+            if (integrity !== actual) {
+              throw new Error("npm pack reported " + JSON.stringify(integrity) + ", but the file has " + actual);
+            }
+            fs.appendFileSync(GITHUB_OUTPUT, "tarball=" + tarball + "\nintegrity=" + actual + "\n");
+            console.log(filename + " " + actual);
+          ' || fail "npm pack did not produce the expected tarball."
+
+      - name: Publish, unless this version is already on npm
+        id: publish
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          TARBALL: ${{ steps.pack.outputs.tarball }}
+          INTEGRITY: ${{ steps.pack.outputs.integrity }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$1"; exit 1; }
+
+          # The registry's integrity for this version, or "absent" when the registry says the version
+          # does not exist. Any other answer is an error: it must not lead to a publish or a pass.
+          status=0
+          view="$(npm view "${PACKAGE_NAME}@${VERSION}" dist.integrity --json)" || status=$?
+          on_npm="$(VIEW="$view" STATUS="$status" node -e '
+            const { VIEW, STATUS } = process.env;
+            let data;
+            try { data = JSON.parse(VIEW); } catch {}
+            const integrity = typeof data === "string" && /^sha512-[A-Za-z0-9+\/]+={0,2}$/.test(data);
+            if (STATUS === "0" && integrity) console.log(data);
+            else if (STATUS !== "0" && data?.error?.code === "E404") console.log("absent");
+            else process.exit(1);
+          ')" || fail "Could not tell from the registry whether ${PACKAGE_NAME}@${VERSION} is published."
+
+          if [[ "$on_npm" == "absent" ]]; then
+            npm publish "$TARBALL" --provenance --access public --ignore-scripts --tag latest
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          elif [[ "$on_npm" == "$INTEGRITY" ]]; then
+            echo "::notice::${PACKAGE_NAME}@${VERSION} is already on npm with the integrity of this tarball. Not publishing again."
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          else
+            fail "${PACKAGE_NAME}@${VERSION} is already on npm with integrity ${on_npm}, but this tarball has ${INTEGRITY}."
+          fi
+
+      - name: The registry serves this tarball as latest
+        if: steps.publish.outputs.published == 'true'
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          INTEGRITY: ${{ steps.pack.outputs.integrity }}
+        run: |
+          set -euo pipefail
+
+          # A new version can take a moment to show: ask for up to three minutes.
+          for attempt in {1..18}; do
+            status=0
+            view="$(npm view "${PACKAGE_NAME}@${VERSION}" dist.integrity dist-tags.latest --json)" || status=$?
+            seen="$(VIEW="$view" STATUS="$status" node -e '
+              const { VIEW, STATUS } = process.env;
+              let data;
+              try { data = JSON.parse(VIEW); } catch {}
+              const show = (value) => (typeof value === "string" && /^[A-Za-z0-9+\/=.-]+$/.test(value) ? value : "unknown");
+              if (STATUS === "0" && data && typeof data === "object") {
+                console.log("integrity " + show(data["dist.integrity"]) + ", latest " + show(data["dist-tags.latest"]));
+              } else {
+                console.log("no answer for this version");
+              }
+            ')"
+            if [[ "$seen" == "integrity ${INTEGRITY}, latest ${VERSION}" ]]; then
+              echo "::notice::${PACKAGE_NAME}@${VERSION} is on npm as latest with integrity ${INTEGRITY}."
+              exit 0
+            fi
+            echo "Attempt ${attempt} of 18: ${seen}"
+            sleep 10
+          done
+          echo "::error::The registry shows ${seen} for ${PACKAGE_NAME}@${VERSION}; expected integrity ${INTEGRITY}, latest ${VERSION}."
+          exit 1
+
+  move-v1:
+    name: move v1
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # to move the v1 tag
+    steps:
+      # Keeps the token (the default): the last step pushes the tag with it. No project code runs here.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.publish.outputs.commit }}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+
+      - name: Move v1 to the release, only forwards
+        env:
+          RELEASE_COMMIT: ${{ needs.publish.outputs.commit }}
+          VERSION: ${{ needs.publish.outputs.version }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$1"; exit 1; }
+
+          [[ "$VERSION" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || fail "The published version is not X.Y.Z."
+          new=("${BASH_REMATCH[@]:1}")
+          [[ "$RELEASE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || fail "The published commit is not a full commit SHA."
+          [[ "$(git rev-parse --verify HEAD)" == "$RELEASE_COMMIT" ]] || fail "The checkout is not the published commit."
+
+          if (( 10#${new[0]} != 1 )); then
+            echo "::notice::v1 stays where it is: ${VERSION} is not a 1.x release."
+            exit 0
+          fi
+
+          # v1 as the repository has it now. It must exist: this job never creates a tag.
+          git fetch --no-tags --depth=1 origin refs/tags/v1 || fail "Could not fetch refs/tags/v1."
+          old_ref="$(git rev-parse --verify FETCH_HEAD)"
+          old_commit="$(git rev-parse --verify 'FETCH_HEAD^{commit}')"
+
+          if [[ "$old_commit" != "$RELEASE_COMMIT" ]]; then
+            old_version="$(git show "${old_commit}:package.json" |
+              node -p 'JSON.parse(require("node:fs").readFileSync(0, "utf8")).version')" ||
+              fail "Could not read package.json at v1 (${old_commit})."
+            [[ "$old_version" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] ||
+              fail "package.json at v1 (${old_commit}) has no X.Y.Z version."
+            old=("${BASH_REMATCH[@]:1}")
+
+            order=same
+            for i in 0 1 2; do
+              if (( 10#${new[i]} > 10#${old[i]} )); then order=newer; break; fi
+              if (( 10#${new[i]} < 10#${old[i]} )); then order=older; break; fi
+            done
+            if [[ "$order" == "older" ]]; then
+              echo "::notice::v1 stays at ${old_commit} (${old_version}): ${VERSION} is older."
+              exit 0
+            fi
+            [[ "$order" == "newer" ]] ||
+              fail "v1 is at ${old_commit}, another commit that is also version ${old_version}. Not moving it."
+
+            # Moves v1 only if it is still where it was just read.
+            git push --force-with-lease="refs/tags/v1:${old_ref}" origin "${RELEASE_COMMIT}:refs/tags/v1"
+          fi
+
+          now="$(git ls-remote origin refs/tags/v1 'refs/tags/v1^{}' |
+            awk '
+              $2 == "refs/tags/v1" { direct = $1 }
+              $2 == "refs/tags/v1^{}" { peeled = $1 }
+              END { print (peeled != "" ? peeled : direct) }')"
+          [[ "$now" == "$RELEASE_COMMIT" ]] ||
+            fail "v1 is at ${now:-no commit}, not at the release commit ${RELEASE_COMMIT}."
+          echo "::notice::v1 is at ${RELEASE_COMMIT} (${VERSION})."
