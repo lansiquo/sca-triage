@@ -25,6 +25,14 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `vite.config.js`, was "imported" and ranked P1. It is now `config-only`, which doesn't count as
   loaded. A config file that loads a production package still counts as runtime code.
 
+### Security
+- Reachability: `/*` or `//` in JSX text, like `<code>src/*.js</code>`, was read as the start of a
+  comment, so imports after it could be missed and a vulnerable package could rank below the
+  default gate. An import after such text is now found whenever the same import is found without
+  it: `import`, `require`, `import()`, template literals and `createRequire` aliases of any name.
+  After a comment that might be JSX text, anything that looks like an import or require counts as
+  loaded, even inside a comment or a string (GHSA-vgjq-gfc7-fjvv) [W-sca-triage-4]
+
 ## [1.2.4] - 2026-11-10
 
 ### Fixed

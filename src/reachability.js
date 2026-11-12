@@ -126,7 +126,8 @@ function isTestPath(rel, workspaceRoots) {
 
 // Fallback patterns for text the tokenizer below can't read reliably. They over-match on
 // purpose (code in a comment counts): when unsure, a package counts as loaded. The gaps
-// they allow are bounded, so a hostile file can't make them backtrack quadratically.
+// they allow are bounded, so a hostile file can't make them backtrack quadratically. They
+// don't know template literals, createRequire aliases or escapes; see looseHits for those.
 const Q = `(['"])`; // opening quote, closed with \\1
 const SPEC = `([^'"\`\\s]{1,500})`; // a package specifier, maybe with a subpath
 const COMMENTS = `\\s*(?:(?:\\/\\*(?:[^*]|\\*(?!\\/)){0,400}\\*\\/|\\/\\/[^\\n]{0,400}\\n)\\s*){0,8}`;
@@ -181,13 +182,22 @@ function regexEnd(text, i) {
   return -1;
 }
 
+// A word character. The tokenizer splits code into words and single other characters, and
+// looseHits must split it the same way: a createRequire alias is known by the last such token
+// of its name, so `chargé` is known as "é" and `loaders[0]` as "]".
+const WORD = /[\w$]/;
+
 // A single lexical pass avoids both declaration-length limits and regex backtracking.
 // This is an import inventory, not a JavaScript parser. Whatever it can't read reliably is
 // returned in `unsure` as { start, end } ranges for the fallback patterns:
 //   - a line with a quote that has no partner on it, or a "/" that looks like the start of a
 //     regular expression but never ends (an apostrophe in JSX text, unusual syntax);
-//   - everything after a comment or template literal that is never closed.
-function tokens(text) {
+//   - everything after a comment or template literal that is never closed;
+//   - everything after a comment that might be JSX text (see mayBeJsxText).
+// `loose` is the offset of the first comment that is never closed or might be JSX text, or -1.
+// From there on the patterns are not enough, and looseHits searches too. `i` and `max` let
+// looseHits read a single string: start at offset i, stop after max tokens.
+function tokens(text, i = 0, max = Infinity) {
   const out = [];
   const unsure = [];
   let line = 1, braceDepth = 0;
@@ -201,13 +211,31 @@ function tokens(text) {
     oddLine = line;
     unsure.push({ start: text.lastIndexOf('\n', i - 1) + 1, end: lineEnd(i) });
   };
-  for (let i = 0; i < text.length;) {
+  // "/*" and "//" in JSX text (<code>src/*.js</code>, <p>http://x</p>) are text. JSX text
+  // contains none of { } < >, so it can only start after a ">" or "}", and it can only hide
+  // code if the "comment" runs past its end, a "<" or "{". Such a comment is read as one, and
+  // the rest of the file also goes to the fallback, since the tokenizer may resume inside a
+  // string or template literal. The last { } < > is tracked in one forward pass.
+  let mark = '', markPos = 0, loose = -1;
+  const mayBeJsxText = (start, end) => {
+    if (loose !== -1) return;
+    for (; markPos < start; markPos++) if ('{}<>'.includes(text[markPos])) mark = text[markPos];
+    if ((mark !== '>' && mark !== '}') || !/[<{]/.test(text.slice(start, end))) return;
+    loose = start;
+    unsure.push({ start, end: text.length });
+  };
+  for (; i < text.length && out.length < max;) {
     const c = text[i];
     if (/\s/.test(c)) { if (c === '\n') line++; i++; continue; }
-    if (text.startsWith('//', i)) { i = lineEnd(i); continue; }
+    if (text.startsWith('//', i)) { const end = lineEnd(i); mayBeJsxText(i, end); i = end; continue; }
     if (text.startsWith('/*', i)) {
       const close = text.indexOf('*/', i + 2);
-      if (close === -1) { unsure.push({ start: i, end: text.length }); break; }
+      if (close === -1) {
+        if (loose === -1) loose = i;
+        unsure.push({ start: i, end: text.length });
+        break;
+      }
+      mayBeJsxText(i, close);
       for (let k = i; k < close; k++) if (text[k] === '\n') line++;
       i = close + 2;
       continue;
@@ -262,9 +290,9 @@ function tokens(text) {
       } else i++;
       continue;
     }
-    if (/[\w$]/.test(c)) {
+    if (WORD.test(c)) {
       const start = i++;
-      while (i < text.length && /[\w$]/.test(text[i])) i++;
+      while (i < text.length && WORD.test(text[i])) i++;
       out.push({ value: text.slice(start, i), line });
     } else {
       if (c === '{') braceDepth++;
@@ -272,7 +300,90 @@ function tokens(text) {
       out.push({ value: c, line }); i++;
     }
   }
-  return { tokens: out, unsure };
+  return { tokens: out, unsure, loose };
+}
+
+// gap[i - start] is the offset after the whitespace and comments that begin at offset i.
+// Filled in one backward pass, so skipping stays linear however the comments are arranged.
+function gapEnds(text, start) {
+  const n = text.length;
+  const gap = new Int32Array(n - start + 1);
+  gap[n - start] = n;
+  let newline = n; // the next "\n" at or after i
+  let close1 = -1, close2 = -1; // the next "*/" at or after i + 1, and at or after i + 2
+  const SLASH = 47, STAR = 42;
+  for (let i = n - 1, next = -1; i >= start; i--) {
+    const c = text.charCodeAt(i); // character codes: this loop visits every character
+    if (c === 10) newline = i;
+    // Whitespace as /\s/ sees it: tab to carriage return, space, and the ones beyond ASCII.
+    if (c === 32 || (c >= 9 && c <= 13) || (c > 127 && /\s/.test(text[i]))) gap[i - start] = gap[i + 1 - start];
+    else if (c === SLASH && next === SLASH) gap[i - start] = gap[newline - start];
+    else if (c === SLASH && next === STAR) gap[i - start] = close2 === -1 ? n : gap[close2 + 2 - start];
+    else gap[i - start] = i;
+    close2 = close1;
+    if (c === STAR && next === SLASH) close1 = i;
+    next = c;
+  }
+  return gap;
+}
+
+// The search for text after a comment that may not be one ("/*" or "//" in JSX text). There the
+// tokenizer can't say what is a comment or a string, so nothing here depends on it: `require`, a
+// createRequire alias, `import` or `from` counts wherever a string follows it (after "(" for a
+// call), also inside a real comment or string. Text is split into the tokenizer's tokens (see
+// WORD), and the gaps between them and the string itself are read as the tokenizer reads them
+// (comments of any length, template literals, escapes), so an import in real code is found
+// whatever comes before it. Aliases are tracked as specifiers() tracks them: the token before
+// "=" when the right side is createRequire( or <token>.createRequire(. Those found in this text
+// are added to `aliases`, for calls the tokenizer reads elsewhere in the file.
+// Returns { spec, index } hits.
+function looseHits(text, start, aliases) {
+  const gap = gapEnds(text, start);
+  const after = (i) => gap[i - start];
+  const isQuote = (c) => c === "'" || c === '"' || c === '`';
+  const hits = [];
+  const calls = []; // { token, index, at }: a token, then "(" and a quote at offset `at`
+  // Tokens before "=", by the offset of the token that starts the right side, and by the offset
+  // of the token after "<that token>.".
+  const direct = new Map(), member = new Map();
+  const expect = (map, at, names) => {
+    if (at >= text.length) return;
+    const list = map.get(at);
+    if (list) for (const name of names) list.push(name);
+    else map.set(at, names);
+  };
+  const string = (index, at) => {
+    const t = tokens(text, at, 1).tokens[0];
+    if (!t?.literal) return;
+    const spec = t.template && !t.complete ? packageFromTemplate(t.value, false) : t.value;
+    if (spec) hits.push({ spec, index });
+  };
+  let p = start, end = start; // the token being read is text.slice(p, end)
+  const is = (word) => end - p === word.length && text.startsWith(word, p);
+  for (; p < text.length; p = end) {
+    end = p + 1;
+    if (gap[p - start] !== p && text[p] !== '/') continue; // whitespace
+    if (WORD.test(text[p])) while (end < text.length && WORD.test(text[end])) end++;
+    let j = after(end);
+    if (direct.size || member.size) {
+      for (const map of [direct, member]) {
+        const names = map.get(p);
+        if (!names) continue;
+        map.delete(p);
+        if (is('createRequire') && text[j] === '(') for (const name of names) aliases.add(name);
+        else if (map === direct && text[j] === '.') expect(member, after(j + 1), names);
+      }
+    }
+    if (text[j] === '=') expect(direct, after(j + 1), [text.slice(p, end)]);
+    if ((is('import') || is('from')) && isQuote(text[j])) string(p, j);
+    if (text[j] === '.') {
+      const k = after(j + 1);
+      if (text.startsWith('resolve', k) && !WORD.test(text[k + 7] ?? '')) j = after(k + 7);
+    }
+    if (text[j] === '(' && isQuote(text[after(j + 1)])) calls.push({ token: text.slice(p, end), index: p, at: after(j + 1) });
+  }
+  for (const call of calls) if (call.token === 'import' || aliases.has(call.token)) string(call.index, call.at);
+  return hits;
 }
 
 // In .vue, .svelte and .astro files only <script> blocks, and Astro's leading "---" block,
@@ -325,7 +436,7 @@ function* specifiers(text, file = '', names = new Set()) {
     // Outside the scripts, only calls count (a Vue template can call require()).
     hits.push(...patternHits(blank(text, ranges, false), 0, CALL_PATTERNS));
   }
-  const { tokens: ts, unsure } = tokens(code);
+  const { tokens: ts, unsure, loose } = tokens(code);
   for (const r of unsure) hits.push(...patternHits(code.slice(r.start, r.end), r.start, FALLBACK_PATTERNS));
   const aliases = new Set(['require']);
   for (let i = 0; i < ts.length; i++) {
@@ -334,6 +445,7 @@ function* specifiers(text, file = '', names = new Set()) {
     if (ts[j + 1]?.value === '.') j += 2;
     if (ts[j]?.value === 'createRequire' && ts[j + 1]?.value === '(') aliases.add(ts[i].value);
   }
+  if (loose !== -1) for (const hit of looseHits(code, loose, aliases)) hits.push(hit);
   const nameOf = (t) => t.template ? packageFromTemplate(t.value, t.complete) : packageNameFromSpecifier(t.value);
   const used = new Set(); // string tokens read as import specifiers
   for (let i = 0; i < ts.length; i++) {
