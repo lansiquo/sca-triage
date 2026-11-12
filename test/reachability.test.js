@@ -158,6 +158,13 @@ test('finds imports after "/*" or "//" in JSX text', (t) => {
   assert.deepEqual(imports.get('plain')?.runtime, ['comments.jsx:9']);
 });
 
+// Code after "/*" or "//" in JSX text: the marker with a later "*/", with none, and "//".
+const JSX_MARKERS = {
+  block: (code) => `const C = () => <pre>lib/*.mjs</pre>;\n${code}\n/* end */\n`,
+  'block-open': (code) => `const C = () => <pre>lib/*.mjs</pre>;\n${code}\n`, // no "*/" follows
+  line: (code) => `const C = () => <p>http://example.com</p>; ${code}\n`,
+};
+
 // After "/*" or "//" in JSX text the tokenizer can't be trusted, and the search that takes over
 // has to know every form the tokenizer knows. It used to miss template literals, createRequire
 // aliases, escaped specifiers and comments longer than the fallback patterns allow.
@@ -183,14 +190,9 @@ test('after "/*" or "//" in JSX text, every import form is still found', (t) => 
     'comment-before-paren': "require /* c */ . /* d */ resolve /* e */ ('vuln');",
     'long-subpath': `require('vuln/${'a/'.repeat(400)}b');`,
   };
-  const markers = {
-    block: (code) => `const C = () => <pre>lib/*.mjs</pre>;\n${code}\n/* end */\n`,
-    'block-open': (code) => `const C = () => <pre>lib/*.mjs</pre>;\n${code}\n`, // no "*/" follows
-    line: (code) => `const C = () => <p>http://example.com</p>; ${code}\n`,
-  };
   const files = [];
   for (const ext of ['jsx', 'tsx', 'js']) {
-    for (const [marker, wrap] of Object.entries(markers)) {
+    for (const [marker, wrap] of Object.entries(JSX_MARKERS)) {
       for (const [form, code] of Object.entries(forms)) {
         files.push(`${form}.${marker}.${ext}`);
         writeFileSync(join(dir, files.at(-1)), wrap(code));
@@ -208,6 +210,46 @@ test('after "/*" or "//" in JSX text, every import form is still found', (t) => 
   assert.deepEqual(imports.get('from-template')?.runtime, ['template.jsx:2']);
   assert.deepEqual(imports.get('from-alias')?.runtime, ['alias.jsx:4']);
   assert.deepEqual(imports.get('from-later-alias')?.runtime, ['alias-later.jsx:1']);
+});
+
+// A createRequire alias is known by the last token of its name as the tokenizer splits it: a
+// word, or any other single character. The search after JSX text only knew words of [\w$], so
+// an alias whose name ends otherwise was found everywhere except after "/*" or "//" in JSX text.
+test('after "/*" or "//" in JSX text, a createRequire alias with any name is still found', (t) => {
+  const dir = tempProject(t);
+  const names = {
+    accent: 'charg\u00e9', // chargé: ends in a character that is not ASCII
+    'non-ascii': '\u0437\u0430\u0433\u0440\u0443\u0437\u0438\u0442\u044c', // загрузить: no ASCII at all
+    astral: '\u{1d4b3}', // 𝒳: one character, two UTF-16 code units
+    middle: 'ch\u00e4rge', // chärge: not ASCII in the middle only
+    element: 'loaders[0]', // not a plain name
+  };
+  const declare = (name) => `${name.includes('[') ? '' : 'const '}${name} = createRequire(import.meta.url);`;
+  const orders = {
+    // declared before the JSX text and called after it
+    before: (name, wrap) => `${declare(name)}\n${wrap(`${name}('vuln');`)}`,
+    // declared and called after it
+    after: (name, wrap) => wrap(`${declare(name)} ${name}.resolve('vuln');`),
+    // declared after it and called before it
+    'called-first': (name, wrap) => `function f() { return ${name}(\`vuln\`); }\n${wrap(declare(name))}`,
+  };
+  // The same files with no "/*" or "//" in the JSX text are the controls.
+  const markers = { ...JSX_MARKERS, none: (code) => `const C = () => <pre>lib files</pre>;\n${code}\n/* end */\n` };
+  const files = [];
+  for (const ext of ['jsx', 'tsx', 'js']) {
+    for (const [marker, wrap] of Object.entries(markers)) {
+      for (const [label, name] of Object.entries(names)) {
+        for (const [order, source] of Object.entries(orders)) {
+          files.push(`${label}.${order}.${marker}.${ext}`);
+          writeFileSync(join(dir, files.at(-1)), source(name, wrap));
+        }
+      }
+    }
+  }
+  const imports = findImports(dir);
+  const found = new Set((imports.get('vuln')?.runtime ?? []).map((loc) => loc.split(':')[0]));
+  assert.deepEqual(files.filter((file) => !found.has(file)), []);
+  assert.deepEqual(imports.get('vuln').runtime.filter((loc) => loc.startsWith('accent.before.block.jsx')), ['accent.before.block.jsx:3']);
 });
 
 // The price of that search: a real comment can look like JSX text. It does when the last of
