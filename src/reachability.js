@@ -182,6 +182,11 @@ function regexEnd(text, i) {
   return -1;
 }
 
+// A word character. The tokenizer splits code into words and single other characters, and
+// looseHits must split it the same way: a createRequire alias is known by the last such token
+// of its name, so `chargé` is known as "é" and `loaders[0]` as "]".
+const WORD = /[\w$]/;
+
 // A single lexical pass avoids both declaration-length limits and regex backtracking.
 // This is an import inventory, not a JavaScript parser. Whatever it can't read reliably is
 // returned in `unsure` as { start, end } ranges for the fallback patterns:
@@ -285,9 +290,9 @@ function tokens(text, i = 0, max = Infinity) {
       } else i++;
       continue;
     }
-    if (/[\w$]/.test(c)) {
+    if (WORD.test(c)) {
       const start = i++;
-      while (i < text.length && /[\w$]/.test(text[i])) i++;
+      while (i < text.length && WORD.test(text[i])) i++;
       out.push({ value: text.slice(start, i), line });
     } else {
       if (c === '{') braceDepth++;
@@ -325,21 +330,24 @@ function gapEnds(text, start) {
 // The search for text after a comment that may not be one ("/*" or "//" in JSX text). There the
 // tokenizer can't say what is a comment or a string, so nothing here depends on it: `require`, a
 // createRequire alias, `import` or `from` counts wherever a string follows it (after "(" for a
-// call), also inside a real comment or string. The gaps between them and the string itself are
-// read as the tokenizer reads them (comments of any length, template literals, escapes), so an
-// import in real code is found whatever comes before it. Aliases declared in this text are added
-// to `aliases`, for calls the tokenizer reads elsewhere in the file. Returns { spec, index } hits.
+// call), also inside a real comment or string. Text is split into the tokenizer's tokens (see
+// WORD), and the gaps between them and the string itself are read as the tokenizer reads them
+// (comments of any length, template literals, escapes), so an import in real code is found
+// whatever comes before it. Aliases are tracked as specifiers() tracks them: the token before
+// "=" when the right side is createRequire( or <token>.createRequire(. Those found in this text
+// are added to `aliases`, for calls the tokenizer reads elsewhere in the file.
+// Returns { spec, index } hits.
 function looseHits(text, start, aliases) {
   const gap = gapEnds(text, start);
   const after = (i) => gap[i - start];
   const isQuote = (c) => c === "'" || c === '"' || c === '`';
   const hits = [];
-  const calls = []; // { word, index, at }: a word, then "(" and a quote at offset `at`
-  // Names assigned with "=", by the offset of the word that starts the right side, and by the
-  // offset of the word after "<that word>.": name = createRequire(), name = module.createRequire().
+  const calls = []; // { token, index, at }: a token, then "(" and a quote at offset `at`
+  // Tokens before "=", by the offset of the token that starts the right side, and by the offset
+  // of the token after "<that token>.".
   const direct = new Map(), member = new Map();
   const expect = (map, at, names) => {
-    if (!/[\w$]/.test(text[at] ?? '')) return;
+    if (at >= text.length) return;
     const list = map.get(at);
     if (list) for (const name of names) list.push(name);
     else map.set(at, names);
@@ -350,26 +358,31 @@ function looseHits(text, start, aliases) {
     const spec = t.template && !t.complete ? packageFromTemplate(t.value, false) : t.value;
     if (spec) hits.push({ spec, index });
   };
-  const word = /[\w$]+/g;
-  word.lastIndex = start;
-  for (let m; (m = word.exec(text));) {
-    let j = after(word.lastIndex);
-    for (const map of direct.size || member.size ? [direct, member] : []) {
-      const names = map.get(m.index);
-      if (!names) continue;
-      map.delete(m.index);
-      if (m[0] === 'createRequire' && text[j] === '(') for (const name of names) aliases.add(name);
-      else if (map === direct && text[j] === '.') expect(member, after(j + 1), names);
+  let p = start, end = start; // the token being read is text.slice(p, end)
+  const is = (word) => end - p === word.length && text.startsWith(word, p);
+  for (; p < text.length; p = end) {
+    end = p + 1;
+    if (gap[p - start] !== p && text[p] !== '/') continue; // whitespace
+    if (WORD.test(text[p])) while (end < text.length && WORD.test(text[end])) end++;
+    let j = after(end);
+    if (direct.size || member.size) {
+      for (const map of [direct, member]) {
+        const names = map.get(p);
+        if (!names) continue;
+        map.delete(p);
+        if (is('createRequire') && text[j] === '(') for (const name of names) aliases.add(name);
+        else if (map === direct && text[j] === '.') expect(member, after(j + 1), names);
+      }
     }
-    if (text[j] === '=') expect(direct, after(j + 1), [m[0]]);
-    if ((m[0] === 'import' || m[0] === 'from') && isQuote(text[j])) string(m.index, j);
+    if (text[j] === '=') expect(direct, after(j + 1), [text.slice(p, end)]);
+    if ((is('import') || is('from')) && isQuote(text[j])) string(p, j);
     if (text[j] === '.') {
       const k = after(j + 1);
-      if (text.startsWith('resolve', k) && !/[\w$]/.test(text[k + 7] ?? '')) j = after(k + 7);
+      if (text.startsWith('resolve', k) && !WORD.test(text[k + 7] ?? '')) j = after(k + 7);
     }
-    if (text[j] === '(' && isQuote(text[after(j + 1)])) calls.push({ word: m[0], index: m.index, at: after(j + 1) });
+    if (text[j] === '(' && isQuote(text[after(j + 1)])) calls.push({ token: text.slice(p, end), index: p, at: after(j + 1) });
   }
-  for (const call of calls) if (call.word === 'import' || aliases.has(call.word)) string(call.index, call.at);
+  for (const call of calls) if (call.token === 'import' || aliases.has(call.token)) string(call.index, call.at);
   return hits;
 }
 
