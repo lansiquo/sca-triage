@@ -32,6 +32,8 @@ npm run test:pack
   and a link for the version.
 - CI runs both on Node.js 20, 22 and 24 on Linux, macOS and Windows. It also runs the GitHub Action
   itself on a clean project and on a vulnerable one.
+- CI also scans the code with [sast-triage](https://github.com/lansiquo/sast-triage): a pull
+  request fails only on a P1 finding it adds, and a push to `main` fails on any P1 in a full scan.
 
 ## Releases
 

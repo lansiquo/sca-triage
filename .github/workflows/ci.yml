@@ -69,3 +69,18 @@ jobs:
       - name: The gate step failed
         shell: bash
         run: test "${{ steps.gate.outcome }}" = "failure"
+
+  # Scans the JavaScript in this repository with sast-triage. On a pull request the Action compares
+  # with the base branch and fails only on a new P1 finding. On a push to main it scans the whole
+  # tree, where every finding counts as new.
+  sast-triage:
+    name: sast-triage
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0 # the base branch's history, which the pull request scan compares with
+      - name: Scan the code with sast-triage
+        uses: lansiquo/sast-triage@87fede70bba02341afed8c6a6688f50dd1c622b4 # v2.6.0
