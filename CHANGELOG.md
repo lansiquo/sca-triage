@@ -7,6 +7,15 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- Releases: a GitHub workflow now publishes each stable release to npm when its GitHub release is
+  published, with npm trusted publishing (no stored token) and provenance, so npm shows the commit
+  a version was built from. Stable means a `vX.Y.Z` tag (SemVer, no leading zeros) that is not a
+  draft or prerelease. A version is published only if it is higher than npm's `latest`, and it is
+  refused when `latest` cannot be read. The workflow then moves the `v1` tag to the release, only
+  forwards and only for 1.x versions; if GitHub refuses that push, the job fails and prints the
+  command that moves `v1` by hand. [W-sca-triage-11]
+
 ## [1.3.0] - 2026-11-12
 
 Compatibility: gate results and `fix` command behavior can change in 1.3.0. Major upgrades
