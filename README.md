@@ -182,7 +182,8 @@ preferred; anything beyond it counts as a major upgrade.
 If an install fails, or npm installs anything other than the plan, `fix` puts `package.json`, any
 workspace `package.json` it pinned and `package-lock.json` back and stops before the second test
 run. Run `npm ci` to reset `node_modules`. If your tests fail after the upgrade, the changes stay
-so you can see what broke.
+so you can see what broke. If the final rescan fails (the registry is down, say), `fix` exits with
+code 2 but keeps the tested changes, unlike a failed install.
 
 `plan` and `fix` list what they leave for you: upgrades an override can't make without changing
 other copies (**Needs a manual upgrade**, with the reason), copies bundled inside another package,
