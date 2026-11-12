@@ -270,10 +270,17 @@ the override.
 ## Releases
 
 Versions after 1.3.0 are published to npm from GitHub by the
-[publish workflow](.github/workflows/publish.yml), when their GitHub release is published. It packs
-the commit of the release tag and publishes that tarball with npm trusted publishing, so no npm
-token is stored, and with [provenance](https://docs.npmjs.com/generating-provenance-statements):
-npm shows the commit and the workflow run a version was built from.
+[publish workflow](.github/workflows/publish.yml), when their GitHub release is published. It
+publishes stable releases only: the tag must be `vX.Y.Z` (SemVer, no leading zeros) and match the
+version in `package.json`, drafts and prereleases are skipped, and a version lower than the latest
+one on npm is refused. Releases are published one at a time. The workflow packs the commit of the
+release tag and publishes that tarball with npm trusted publishing, so no npm token is stored, and
+with [provenance](https://docs.npmjs.com/generating-provenance-statements): npm shows the commit
+and the workflow run a version was built from.
+
+It then moves the `v1` tag to the release, only forwards and only for 1.x versions. If GitHub
+refuses that push, the job fails after the npm release is complete and prints the command that
+moves `v1` by hand.
 
 ## More
 
