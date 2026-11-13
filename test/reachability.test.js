@@ -83,12 +83,12 @@ const { specifiers } = await import(
 // A fixed time limit measured the runner instead: it failed on a slow CI runner. So each input is
 // timed as 16 copies of 1x size against 1 copy of 16x size, exactly the same bytes, and only the
 // exponent is checked, against 1.5, halfway between linear and quadratic. What is timed:
-// - only the import finder, on strings already in memory: no file I/O;
-// - in process CPU time, on every platform: time the process spends paused or waiting for a busy
-//   CPU is not CPU time, so neither a slow, busy nor pausing runner changes the ratio;
-// - each side repeated until it has used 250 ms of CPU, so Windows, which counts CPU time in
-//   steps of about 16 ms, is accurate to a few percent.
-// It catches strong super-linear growth (planted rescans reached exponents of 1.6 to 2); a
+// - only the import finder, on strings already in memory, so no file I/O falls inside the timing;
+// - on the clock, the same way on every platform, best of 7 runs per side with the sides taking
+//   turns: a slow runner slows both sides alike, and a busy CPU or a pause only lengthens the runs
+//   it falls in, which the fastest run leaves out. (Process CPU time also counts the engine's
+//   garbage collector threads; with it, one input reached 1.48 on Windows with Node 20 in CI.)
+// It catches strong super-linear growth (planted rescans reached exponents of 1.63 to 1.95); a
 // slowdown that adds only a little super-linear work can stay below 1.5 and pass.
 test('stays linear on hostile input (no ReDoS)', (t) => {
   const dir = tempProject(t);
@@ -117,10 +117,6 @@ test('stays linear on hostile input (no ReDoS)', (t) => {
     large[name] += ' '.repeat(factor * small[name].length - large[name].length);
     assert.equal(Buffer.byteLength(large[name]), factor * Buffer.byteLength(small[name]), name);
   }
-  const cpuMs = () => {
-    const { user, system } = process.cpuUsage();
-    return (user + system) / 1000;
-  };
   const exponents = [];
   for (const name of names) {
     const sides = { '1x': Array(factor).fill(small[name]), [`${factor}x`]: [large[name]] };
@@ -128,17 +124,6 @@ test('stays linear on hostile input (no ReDoS)', (t) => {
       const found = new Set();
       for (const text of texts) for (const hit of specifiers(text, name)) if (hit.name) found.add(hit.name);
       return found;
-    };
-    const timed = (texts, more) => {
-      const start = cpuMs();
-      let repeats = 0;
-      do {
-        scan(texts);
-        repeats++;
-        // Only a guard against a hang; the growth below is the check.
-        assert.ok(cpuMs() - start < 30_000, `${name} took over 30 s`);
-      } while (more(repeats, cpuMs() - start));
-      return { repeats, ms: cpuMs() - start };
     };
     // Untimed: the file-based scan of each side finds what the scan of the strings finds (which
     // also warms up both sides), and skips no file.
@@ -150,10 +135,19 @@ test('stays linear on hostile input (no ReDoS)', (t) => {
       assert.deepEqual(found.skipped, []);
       assert.deepEqual([...found.keys()].sort(), [...scan(texts)].sort());
     }
-    const big = timed(sides[`${factor}x`], (repeats, ms) => ms < 250);
-    const little = timed(sides['1x'], (repeats) => repeats < big.repeats);
+    const best = { '1x': Infinity, [`${factor}x`]: Infinity };
+    for (let run = 0; run < 7; run++) {
+      for (const side of run % 2 ? [`${factor}x`, '1x'] : ['1x', `${factor}x`]) {
+        const before = performance.now();
+        scan(sides[side]);
+        const took = performance.now() - before;
+        // Only a guard against a hang; the growth below is the check.
+        assert.ok(took < 30_000, `${name} at ${side} size took over 30 s`);
+        best[side] = Math.min(best[side], took);
+      }
+    }
     // Time per byte at 16x size over time per byte at 1x size is factor ** (exponent - 1).
-    exponents.push([name, Math.log((factor * big.ms) / little.ms) / Math.log(factor)]);
+    exponents.push([name, Math.log((factor * best[`${factor}x`]) / best['1x']) / Math.log(factor)]);
   }
   t.diagnostic(`growth exponent (1 linear, 2 quadratic): ${exponents.map(([name, e]) => `${name} ${e.toFixed(2)}`).join(', ')}`);
   for (const [name, exponent] of exponents) {
