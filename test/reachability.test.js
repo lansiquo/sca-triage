@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
-import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, symlinkSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { findImports, packageNameFromSpecifier } from '../src/reachability.js';
@@ -69,14 +69,27 @@ test('does not follow symlinks out of the project or around a loop', (t) => {
   assert.deepEqual([...imports.keys()], ['inside-pkg']);
 });
 
+// The scanner's work on one file, run on a string: the import finder of src/reachability.js,
+// loaded from its unchanged source with one export added, so that no file read or other file
+// system delay falls inside the timing below. (That module imports only Node built-ins, which a
+// data: URL module can load.)
+const reachabilitySource = readFileSync(new URL('../src/reachability.js', import.meta.url), 'utf8');
+const { specifiers } = await import(
+  `data:text/javascript;base64,${Buffer.from(`${reachabilitySource}\nexport { specifiers };\n`).toString('base64')}`
+);
+
 // Linear work on 16 times the input takes 16 times as long, a growth exponent of 1 (16 = 16^1);
 // quadratic work (a ReDoS, or a rescan for every token) takes 256 times as long, an exponent of 2.
 // A fixed time limit measured the runner instead: it failed on a slow CI runner. So each input is
-// timed as 16 files of 1x size against 1 file of 16x size, the same bytes, so that a slow runner
-// slows both alike. Best of 5 runs, the two taking turns; only the exponent is checked, against
-// 1.5, halfway between linear and quadratic. It times CPU use, not the clock, because a busy runner
-// pauses the test and the clock counts the pause; Windows counts CPU use in steps of about 16 ms,
-// so there it times the clock.
+// timed as 16 copies of 1x size against 1 copy of 16x size, exactly the same bytes, and only the
+// exponent is checked, against 1.5, halfway between linear and quadratic. What is timed:
+// - only the import finder, on strings already in memory: no file I/O;
+// - in process CPU time, on every platform: time the process spends paused or waiting for a busy
+//   CPU is not CPU time, so neither a slow, busy nor pausing runner changes the ratio;
+// - each side repeated until it has used 250 ms of CPU, so Windows, which counts CPU time in
+//   steps of about 16 ms, is accurate to a few percent.
+// It catches strong super-linear growth (planted rescans reached exponents of 1.6 to 2); a
+// slowdown that adds only a little super-linear work can stay below 1.5 and pass.
 test('stays linear on hostile input (no ReDoS)', (t) => {
   const dir = tempProject(t);
   const hostile = (size) => ({
@@ -99,36 +112,52 @@ test('stays linear on hostile input (no ReDoS)', (t) => {
   const large = hostile(37_500 * factor);
   const names = Object.keys(small);
   for (const name of names) {
-    mkdirSync(join(dir, `${name}-1x`));
-    for (let copy = 0; copy < factor; copy++) writeFileSync(join(dir, `${name}-1x`, `${copy}-${name}`), small[name]);
-    mkdirSync(join(dir, `${name}-${factor}x`));
-    writeFileSync(join(dir, `${name}-${factor}x`, name), large[name]);
+    // Spaces at the end make both sides exactly the same bytes.
+    small[name] += ' '.repeat(Math.max(0, Math.ceil((large[name].length - factor * small[name].length) / factor)));
+    large[name] += ' '.repeat(factor * small[name].length - large[name].length);
+    assert.equal(Buffer.byteLength(large[name]), factor * Buffer.byteLength(small[name]), name);
   }
-  const now = process.platform === 'win32'
-    ? () => performance.now()
-    : () => { const { user, system } = process.cpuUsage(); return (user + system) / 1000; };
-  const best = new Map(names.map((name) => [name, { '1x': Infinity, [`${factor}x`]: Infinity }]));
-  for (let run = 0; run < 5; run++) {
-    for (const name of names) {
-      for (const scale of ['1x', `${factor}x`]) {
-        const before = now();
-        const found = findImports(join(dir, `${name}-${scale}`));
-        const took = now() - before;
+  const cpuMs = () => {
+    const { user, system } = process.cpuUsage();
+    return (user + system) / 1000;
+  };
+  const exponents = [];
+  for (const name of names) {
+    const sides = { '1x': Array(factor).fill(small[name]), [`${factor}x`]: [large[name]] };
+    const scan = (texts) => {
+      const found = new Set();
+      for (const text of texts) for (const hit of specifiers(text, name)) if (hit.name) found.add(hit.name);
+      return found;
+    };
+    const timed = (texts, more) => {
+      const start = cpuMs();
+      let repeats = 0;
+      do {
+        scan(texts);
+        repeats++;
         // Only a guard against a hang; the growth below is the check.
-        assert.ok(took < 30_000, `${name} at ${scale} size took over 30 s`);
-        assert.deepEqual(found.skipped, []);
-        best.get(name)[scale] = Math.min(best.get(name)[scale], took);
-      }
+        assert.ok(cpuMs() - start < 30_000, `${name} took over 30 s`);
+      } while (more(repeats, cpuMs() - start));
+      return { repeats, ms: cpuMs() - start };
+    };
+    // Untimed: the file-based scan of each side finds what the scan of the strings finds (which
+    // also warms up both sides), and skips no file.
+    for (const [side, texts] of Object.entries(sides)) {
+      const project = join(dir, `${name}-${side}`);
+      mkdirSync(project);
+      texts.forEach((text, copy) => writeFileSync(join(project, `${copy}-${name}`), text));
+      const found = findImports(project);
+      assert.deepEqual(found.skipped, []);
+      assert.deepEqual([...found.keys()].sort(), [...scan(texts)].sort());
     }
+    const big = timed(sides[`${factor}x`], (repeats, ms) => ms < 250);
+    const little = timed(sides['1x'], (repeats) => repeats < big.repeats);
+    // Time per byte at 16x size over time per byte at 1x size is factor ** (exponent - 1).
+    exponents.push([name, Math.log((factor * big.ms) / little.ms) / Math.log(factor)]);
   }
-  // Time per file at 16x size over time per file at 1x size is factor ** exponent.
-  const exponents = names.map((name) => {
-    const growth = (factor * best.get(name)[`${factor}x`]) / best.get(name)['1x'];
-    return [name, Math.log(growth) / Math.log(factor), growth];
-  });
   t.diagnostic(`growth exponent (1 linear, 2 quadratic): ${exponents.map(([name, e]) => `${name} ${e.toFixed(2)}`).join(', ')}`);
-  for (const [name, exponent, growth] of exponents) {
-    assert.ok(exponent < 1.5, `${name}: ${factor} times the input took ${growth.toFixed(0)} times as long, a growth exponent of ${exponent.toFixed(2)} (linear is 1, quadratic 2)`);
+  for (const [name, exponent] of exponents) {
+    assert.ok(exponent < 1.5, `${name}: ${factor} times the input took ${(factor ** exponent).toFixed(0)} times as long, a growth exponent of ${exponent.toFixed(2)} (linear is 1, quadratic 2)`);
   }
 });
 
