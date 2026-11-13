@@ -22,6 +22,17 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   responses are retried for 429, 500, 502, 503 and 504, for example, not for every 5xx. The
   release checks and how to run from a clone moved to a new CONTRIBUTING.md, which also covers the
   tests; internal detail moved to ARCHITECTURE.md. [W-sca-triage-13]
+- Tests: the hostile-input (no ReDoS) test no longer fails because a CI runner is slow. It required
+  the scan to finish in under 1000 ms, and took 1150 ms on one Windows runner for a commit that
+  changed only documentation. It now checks growth instead: 16 times the input must take less than
+  64 times as long, a growth exponent below 1.5 (linear is 1, quadratic 2). It times only the
+  import finder on strings in memory, so file reads and their delays are not timed. It repeats the
+  scan, the same number of times for both sizes, until the fastest run of each size lasts at least
+  250 ms, so a clock that ticks only every 16 or 32 ms cannot give a zero, and one 32 ms tick is
+  at most 13% of a counted run. It takes the fastest of up to 7 runs per size, taking turns, so a busy CPU or a pause that lengthens
+  some runs does not fail it, as long as at least one run per size is not slowed. A planted
+  quadratic rescan of the text fails it; a slowdown that adds only a little super-linear work can
+  stay below 1.5 and pass. [W-sca-triage-16]
 
 ## [1.3.0] - 2026-11-12
 

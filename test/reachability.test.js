@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
-import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, symlinkSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { findImports, packageNameFromSpecifier } from '../src/reachability.js';
@@ -69,26 +69,123 @@ test('does not follow symlinks out of the project or around a loop', (t) => {
   assert.deepEqual([...imports.keys()], ['inside-pkg']);
 });
 
+// The scanner's work on one file, run on a string: the import finder of src/reachability.js,
+// loaded from its unchanged source with one export added, so that no file read or other file
+// system delay falls inside the timing below. (That module imports only Node built-ins, which a
+// data: URL module can load.)
+const reachabilitySource = readFileSync(new URL('../src/reachability.js', import.meta.url), 'utf8');
+const { specifiers } = await import(
+  `data:text/javascript;base64,${Buffer.from(`${reachabilitySource}\nexport { specifiers };\n`).toString('base64')}`
+);
+
+// Linear work on 16 times the input takes 16 times as long, a growth exponent of 1 (16 = 16^1);
+// quadratic work (a ReDoS, or a rescan for every token) takes 256 times as long, an exponent of 2.
+// A fixed time limit measured the runner instead: it failed on a slow CI runner. So each input is
+// timed as 16 copies of 1x size against 1 copy of 16x size, exactly the same bytes, and only the
+// exponent is checked, against 1.5, halfway between linear and quadratic. What is timed:
+// - only the import finder, on strings already in memory, so no file I/O falls inside the timing;
+// - on the clock, the same way on every platform: a slow runner slows both sides alike;
+// - repeated until it lasts: the scan count, the same on both sides, doubles until the fastest run
+//   of each side takes at least 250 ms (at most 4096 scans), so a clock that ticks only every 16 or
+//   32 ms cannot give a zero, and one 32 ms tick is at most 13% of a counted run;
+// - the fastest of up to 7 runs per side, the sides taking turns, stopping at the first growth
+//   below 1.5: a busy CPU or a pause only lengthens the runs it falls in, so it cannot fail the
+//   test as long as at least one run per side is not slowed. (Process CPU time also counts the
+//   engine's garbage collector threads; with it, one input reached 1.48 on Windows with Node 20.)
+// It catches strong super-linear growth (a planted quadratic rescan of the text fails it); a
+// slowdown that adds only a little super-linear work can stay below 1.5 and pass.
 test('stays linear on hostile input (no ReDoS)', (t) => {
   const dir = tempProject(t);
-  const size = 300_000;
-  writeFileSync(join(dir, 'a.js'), 'import '.repeat(size / 7));
-  writeFileSync(join(dir, 'b.js'), 'export '.repeat(size / 7));
-  writeFileSync(join(dir, 'c.js'), 'require( /* '.repeat(size / 12));
-  // One line of regex starts that never end, and of quotes whose partner is escaped.
-  writeFileSync(join(dir, 'd.js'), '(/['.repeat(size / 3));
-  writeFileSync(join(dir, 'e.js'), "'" + "\\'".repeat(size / 2));
-  writeFileSync(join(dir, 'f.vue'), '<script>'.repeat(size / 8));
-  // Comments that might be JSX text, each one a reason to search the rest of the file.
-  writeFileSync(join(dir, 'g.jsx'), '>a/*<*/'.repeat(size / 14));
-  writeFileSync(join(dir, 'h.jsx'), '}//{\n'.repeat(size / 10));
-  // After such a comment: words whose gaps all run through one far "*/" and then a long row of
-  // comments, and assignments whose right side is the same far word.
-  writeFileSync(join(dir, 'i.jsx'), '>a/*<*/' + 'a=/*'.repeat(size / 24) + '*/' + '/**/'.repeat(size / 24) + 'b.createRequire(');
-  const started = process.hrtime.bigint();
-  findImports(dir);
-  const ms = Number(process.hrtime.bigint() - started) / 1e6;
-  assert.ok(ms < 1000, `took ${ms.toFixed(0)} ms`);
+  const hostile = (size) => ({
+    'a.js': 'import '.repeat(size / 7),
+    'b.js': 'export '.repeat(size / 7),
+    'c.js': 'require( /* '.repeat(size / 12),
+    // One line of regex starts that never end, and of quotes whose partner is escaped.
+    'd.js': '(/['.repeat(size / 3),
+    'e.js': "'" + "\\'".repeat(size / 2),
+    'f.vue': '<script>'.repeat(size / 8),
+    // Comments that might be JSX text, each one a reason to search the rest of the file.
+    'g.jsx': '>a/*<*/'.repeat(size / 14),
+    'h.jsx': '}//{\n'.repeat(size / 10),
+    // After such a comment: words whose gaps all run through one far "*/" and then a long row of
+    // comments, and assignments whose right side is the same far word.
+    'i.jsx': '>a/*<*/' + 'a=/*'.repeat(size / 24) + '*/' + '/**/'.repeat(size / 24) + 'b.createRequire(',
+  });
+  const factor = 16;
+  const small = hostile(37_500);
+  const large = hostile(37_500 * factor);
+  const names = Object.keys(small);
+  for (const name of names) {
+    // Spaces at the end make both sides exactly the same bytes.
+    small[name] += ' '.repeat(Math.max(0, Math.ceil((large[name].length - factor * small[name].length) / factor)));
+    large[name] += ' '.repeat(factor * small[name].length - large[name].length);
+    assert.equal(Buffer.byteLength(large[name]), factor * Buffer.byteLength(small[name]), name);
+  }
+  const exponents = [];
+  for (const name of names) {
+    const sides = { '1x': Array(factor).fill(small[name]), [`${factor}x`]: [large[name]] };
+    const scan = (texts) => {
+      const found = new Set();
+      for (const text of texts) for (const hit of specifiers(text, name)) if (hit.name) found.add(hit.name);
+      return found;
+    };
+    // Untimed: the file-based scan of each side finds what the scan of the strings finds (which
+    // also warms up both sides), and skips no file.
+    for (const [side, texts] of Object.entries(sides)) {
+      const project = join(dir, `${name}-${side}`);
+      mkdirSync(project);
+      texts.forEach((text, copy) => writeFileSync(join(project, `${copy}-${name}`), text));
+      const found = findImports(project);
+      assert.deepEqual(found.skipped, []);
+      assert.deepEqual([...found.keys()].sort(), [...scan(texts)].sort());
+    }
+    // Each timed run scans one side `repeat` times, the same count on both sides, so that every
+    // duration that counts is at least 250 ms and a coarse clock tick is a small part of it.
+    // Time per byte at 16x size over time per byte at 1x size is factor ** (exponent - 1).
+    const growth = (best) => Math.log((factor * best[`${factor}x`]) / best['1x']) / Math.log(factor);
+    let repeat = 1;
+    let best;
+    let runs;
+    measure: for (;;) {
+      best = { '1x': Infinity, [`${factor}x`]: Infinity };
+      runs = {};
+      for (let run = 0; run < 7; run++) {
+        for (const side of run % 2 ? [`${factor}x`, '1x'] : ['1x', `${factor}x`]) {
+          const before = performance.now();
+          for (let r = 0; r < repeat; r++) scan(sides[side]);
+          const took = performance.now() - before;
+          assert.ok(Number.isFinite(took) && took >= 0, `${name}: the clock gave an invalid duration (${took})`);
+          // Only a guard against a hang; the growth below is the check.
+          assert.ok(took < 30_000, `${name} at ${side} size took over 30 s`);
+          best[side] = Math.min(best[side], took);
+          runs[side] = (runs[side] ?? 0) + 1;
+          if (best[side] < 250) {
+            // Too short to time (a clock coarser than the run reads 0): double the count on both
+            // sides (up to 4 times at once, as often as this run says it takes to reach 250 ms) and
+            // start this input again, so this run never enters an exponent. The count never
+            // exceeds 4096: a side that would need more fails here.
+            const next = repeat * (best[side] > 0 ? 2 ** Math.min(4, Math.ceil(Math.log2(250 / best[side]))) : 2);
+            assert.ok(next <= 4096, `${name}: ${repeat} scans at ${side} size took ${best[side]} ms by the clock; reaching 250 ms needs at least ${next} scans, over the limit of 4096`);
+            repeat = next;
+            continue measure;
+          }
+        }
+        if (growth(best) < 1.5) break measure;
+      }
+      break;
+    }
+    // The fastest of up to 7 runs per side, taking turns; it stops at the first growth below 1.5.
+    for (const [side, ms] of Object.entries(best)) {
+      assert.ok(ms > 0 && Number.isFinite(ms), `${name}: fastest ${side} run took ${ms} ms, not a valid duration`);
+    }
+    const exponent = growth(best);
+    assert.ok(Number.isFinite(exponent) && exponent > 0, `${name}: growth exponent ${exponent} is not a valid measurement, it must be a number above 0 (fastest runs: ${JSON.stringify(best)} ms)`);
+    exponents.push([name, exponent, `${repeat} scans, ${runs['1x']}+${runs[`${factor}x`]} runs`]);
+  }
+  t.diagnostic(`growth exponent (1 linear, 2 quadratic): ${exponents.map(([name, e, how]) => `${name} ${e.toFixed(2)} (${how})`).join(', ')}`);
+  for (const [name, exponent] of exponents) {
+    assert.ok(exponent < 1.5, `${name}: ${factor} times the input took ${(factor ** exponent).toFixed(0)} times as long, a growth exponent of ${exponent.toFixed(2)} (linear is 1, quadratic 2)`);
+  }
 });
 
 // Each of these hid the require from the scanner: the quote or "/*" inside a regular
