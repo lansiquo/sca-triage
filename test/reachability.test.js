@@ -86,8 +86,8 @@ const { specifiers } = await import(
 // - only the import finder, on strings already in memory, so no file I/O falls inside the timing;
 // - on the clock, the same way on every platform: a slow runner slows both sides alike;
 // - repeated until it lasts: the scan count, the same on both sides, doubles until the fastest run
-//   of each side takes at least 250 ms, so a clock that ticks only every 16 or 32 ms cannot give a
-//   zero, and one 32 ms tick is at most 13% of a counted run;
+//   of each side takes at least 250 ms (at most 4096 scans), so a clock that ticks only every 16 or
+//   32 ms cannot give a zero, and one 32 ms tick is at most 13% of a counted run;
 // - the fastest of up to 7 runs per side, the sides taking turns, stopping at the first growth
 //   below 1.5: a busy CPU or a pause only lengthens the runs it falls in, so it cannot fail the
 //   test as long as at least one run per side is not slowed. (Process CPU time also counts the
@@ -160,10 +160,13 @@ test('stays linear on hostile input (no ReDoS)', (t) => {
           best[side] = Math.min(best[side], took);
           runs[side] = (runs[side] ?? 0) + 1;
           if (best[side] < 250) {
-            // Too short to time: double the count on both sides (up to 4 times at once, as often
-            // as this run says it takes to reach 250 ms) and start this input again.
-            assert.ok(repeat < 4096, `${name}: ${repeat} scans at ${side} size took under 250 ms by the clock`);
-            repeat *= best[side] > 0 ? 2 ** Math.min(4, Math.ceil(Math.log2(250 / best[side]))) : 2;
+            // Too short to time (a clock coarser than the run reads 0): double the count on both
+            // sides (up to 4 times at once, as often as this run says it takes to reach 250 ms) and
+            // start this input again, so this run never enters an exponent. The count never
+            // exceeds 4096: a side that would need more fails here.
+            const next = repeat * (best[side] > 0 ? 2 ** Math.min(4, Math.ceil(Math.log2(250 / best[side]))) : 2);
+            assert.ok(next <= 4096, `${name}: ${repeat} scans at ${side} size took ${best[side]} ms by the clock; reaching 250 ms needs at least ${next} scans, over the limit of 4096`);
+            repeat = next;
             continue measure;
           }
         }
@@ -176,7 +179,7 @@ test('stays linear on hostile input (no ReDoS)', (t) => {
       assert.ok(ms > 0 && Number.isFinite(ms), `${name}: fastest ${side} run took ${ms} ms, not a valid duration`);
     }
     const exponent = growth(best);
-    assert.ok(Number.isFinite(exponent), `${name}: growth exponent ${exponent} is not a number (fastest runs: ${JSON.stringify(best)} ms)`);
+    assert.ok(Number.isFinite(exponent) && exponent > 0, `${name}: growth exponent ${exponent} is not a valid measurement, it must be a number above 0 (fastest runs: ${JSON.stringify(best)} ms)`);
     exponents.push([name, exponent, `${repeat} scans, ${runs['1x']}+${runs[`${factor}x`]} runs`]);
   }
   t.diagnostic(`growth exponent (1 linear, 2 quadratic): ${exponents.map(([name, e, how]) => `${name} ${e.toFixed(2)} (${how})`).join(', ')}`);
