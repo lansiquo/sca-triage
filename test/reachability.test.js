@@ -69,26 +69,58 @@ test('does not follow symlinks out of the project or around a loop', (t) => {
   assert.deepEqual([...imports.keys()], ['inside-pkg']);
 });
 
+// Linear work takes about 4 times as long on 4 times the input; quadratic work (a ReDoS, or a
+// rescan for every token) takes 16 times as long. A fixed time limit measured the runner instead:
+// it failed on a slow CI runner. So each input is timed as 4 files of 1x size against 1 file of
+// 4x size, the same bytes, so that a slow or busy runner slows both alike. Best of 5 runs, the two
+// taking turns; only the growth is checked.
 test('stays linear on hostile input (no ReDoS)', (t) => {
   const dir = tempProject(t);
-  const size = 300_000;
-  writeFileSync(join(dir, 'a.js'), 'import '.repeat(size / 7));
-  writeFileSync(join(dir, 'b.js'), 'export '.repeat(size / 7));
-  writeFileSync(join(dir, 'c.js'), 'require( /* '.repeat(size / 12));
-  // One line of regex starts that never end, and of quotes whose partner is escaped.
-  writeFileSync(join(dir, 'd.js'), '(/['.repeat(size / 3));
-  writeFileSync(join(dir, 'e.js'), "'" + "\\'".repeat(size / 2));
-  writeFileSync(join(dir, 'f.vue'), '<script>'.repeat(size / 8));
-  // Comments that might be JSX text, each one a reason to search the rest of the file.
-  writeFileSync(join(dir, 'g.jsx'), '>a/*<*/'.repeat(size / 14));
-  writeFileSync(join(dir, 'h.jsx'), '}//{\n'.repeat(size / 10));
-  // After such a comment: words whose gaps all run through one far "*/" and then a long row of
-  // comments, and assignments whose right side is the same far word.
-  writeFileSync(join(dir, 'i.jsx'), '>a/*<*/' + 'a=/*'.repeat(size / 24) + '*/' + '/**/'.repeat(size / 24) + 'b.createRequire(');
-  const started = process.hrtime.bigint();
-  findImports(dir);
-  const ms = Number(process.hrtime.bigint() - started) / 1e6;
-  assert.ok(ms < 1000, `took ${ms.toFixed(0)} ms`);
+  const hostile = (size) => ({
+    'a.js': 'import '.repeat(size / 7),
+    'b.js': 'export '.repeat(size / 7),
+    'c.js': 'require( /* '.repeat(size / 12),
+    // One line of regex starts that never end, and of quotes whose partner is escaped.
+    'd.js': '(/['.repeat(size / 3),
+    'e.js': "'" + "\\'".repeat(size / 2),
+    'f.vue': '<script>'.repeat(size / 8),
+    // Comments that might be JSX text, each one a reason to search the rest of the file.
+    'g.jsx': '>a/*<*/'.repeat(size / 14),
+    'h.jsx': '}//{\n'.repeat(size / 10),
+    // After such a comment: words whose gaps all run through one far "*/" and then a long row of
+    // comments, and assignments whose right side is the same far word.
+    'i.jsx': '>a/*<*/' + 'a=/*'.repeat(size / 24) + '*/' + '/**/'.repeat(size / 24) + 'b.createRequire(',
+  });
+  const small = hostile(75_000);
+  const large = hostile(300_000);
+  const names = Object.keys(small);
+  for (const name of names) {
+    mkdirSync(join(dir, `${name}-1x`));
+    for (let copy = 0; copy < 4; copy++) writeFileSync(join(dir, `${name}-1x`, `${copy}-${name}`), small[name]);
+    mkdirSync(join(dir, `${name}-4x`));
+    writeFileSync(join(dir, `${name}-4x`, name), large[name]);
+  }
+  const ms = (since) => Number(process.hrtime.bigint() - since) / 1e6;
+  const best = new Map(names.map((name) => [name, { '1x': Infinity, '4x': Infinity }]));
+  for (let run = 0; run < 5; run++) {
+    for (const name of names) {
+      for (const scale of ['1x', '4x']) {
+        const before = process.hrtime.bigint();
+        const found = findImports(join(dir, `${name}-${scale}`));
+        const took = ms(before);
+        // Only a guard against a hang; the growth below is the check.
+        assert.ok(took < 30_000, `${name} at ${scale} size took over 30 s`);
+        assert.deepEqual(found.skipped, []);
+        best.get(name)[scale] = Math.min(best.get(name)[scale], took);
+      }
+    }
+  }
+  // Time per file at 4x size over time per file at 1x size.
+  const ratios = names.map((name) => [name, (4 * best.get(name)['4x']) / best.get(name)['1x']]);
+  t.diagnostic(`time at 4x size / time at 1x: ${ratios.map(([name, r]) => `${name} ${r.toFixed(2)}`).join(', ')}`);
+  for (const [name, ratio] of ratios) {
+    assert.ok(ratio < 8, `${name}: 4 times the input took ${ratio.toFixed(1)} times as long (linear is about 4, quadratic 16)`);
+  }
 });
 
 // Each of these hid the require from the scanner: the quote or "/*" inside a regular
