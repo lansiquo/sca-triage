@@ -69,11 +69,14 @@ test('does not follow symlinks out of the project or around a loop', (t) => {
   assert.deepEqual([...imports.keys()], ['inside-pkg']);
 });
 
-// Linear work takes about 4 times as long on 4 times the input; quadratic work (a ReDoS, or a
-// rescan for every token) takes 16 times as long. A fixed time limit measured the runner instead:
-// it failed on a slow CI runner. So each input is timed as 4 files of 1x size against 1 file of
-// 4x size, the same bytes, so that a slow or busy runner slows both alike. Best of 5 runs, the two
-// taking turns; only the growth is checked.
+// Linear work on 16 times the input takes 16 times as long, a growth exponent of 1 (16 = 16^1);
+// quadratic work (a ReDoS, or a rescan for every token) takes 256 times as long, an exponent of 2.
+// A fixed time limit measured the runner instead: it failed on a slow CI runner. So each input is
+// timed as 16 files of 1x size against 1 file of 16x size, the same bytes, so that a slow runner
+// slows both alike. Best of 5 runs, the two taking turns; only the exponent is checked, against
+// 1.5, halfway between linear and quadratic. It times CPU use, not the clock, because a busy runner
+// pauses the test and the clock counts the pause; Windows counts CPU use in steps of about 16 ms,
+// so there it times the clock.
 test('stays linear on hostile input (no ReDoS)', (t) => {
   const dir = tempProject(t);
   const hostile = (size) => ({
@@ -91,23 +94,26 @@ test('stays linear on hostile input (no ReDoS)', (t) => {
     // comments, and assignments whose right side is the same far word.
     'i.jsx': '>a/*<*/' + 'a=/*'.repeat(size / 24) + '*/' + '/**/'.repeat(size / 24) + 'b.createRequire(',
   });
-  const small = hostile(75_000);
-  const large = hostile(300_000);
+  const factor = 16;
+  const small = hostile(37_500);
+  const large = hostile(37_500 * factor);
   const names = Object.keys(small);
   for (const name of names) {
     mkdirSync(join(dir, `${name}-1x`));
-    for (let copy = 0; copy < 4; copy++) writeFileSync(join(dir, `${name}-1x`, `${copy}-${name}`), small[name]);
-    mkdirSync(join(dir, `${name}-4x`));
-    writeFileSync(join(dir, `${name}-4x`, name), large[name]);
+    for (let copy = 0; copy < factor; copy++) writeFileSync(join(dir, `${name}-1x`, `${copy}-${name}`), small[name]);
+    mkdirSync(join(dir, `${name}-${factor}x`));
+    writeFileSync(join(dir, `${name}-${factor}x`, name), large[name]);
   }
-  const ms = (since) => Number(process.hrtime.bigint() - since) / 1e6;
-  const best = new Map(names.map((name) => [name, { '1x': Infinity, '4x': Infinity }]));
+  const now = process.platform === 'win32'
+    ? () => performance.now()
+    : () => { const { user, system } = process.cpuUsage(); return (user + system) / 1000; };
+  const best = new Map(names.map((name) => [name, { '1x': Infinity, [`${factor}x`]: Infinity }]));
   for (let run = 0; run < 5; run++) {
     for (const name of names) {
-      for (const scale of ['1x', '4x']) {
-        const before = process.hrtime.bigint();
+      for (const scale of ['1x', `${factor}x`]) {
+        const before = now();
         const found = findImports(join(dir, `${name}-${scale}`));
-        const took = ms(before);
+        const took = now() - before;
         // Only a guard against a hang; the growth below is the check.
         assert.ok(took < 30_000, `${name} at ${scale} size took over 30 s`);
         assert.deepEqual(found.skipped, []);
@@ -115,11 +121,14 @@ test('stays linear on hostile input (no ReDoS)', (t) => {
       }
     }
   }
-  // Time per file at 4x size over time per file at 1x size.
-  const ratios = names.map((name) => [name, (4 * best.get(name)['4x']) / best.get(name)['1x']]);
-  t.diagnostic(`time at 4x size / time at 1x: ${ratios.map(([name, r]) => `${name} ${r.toFixed(2)}`).join(', ')}`);
-  for (const [name, ratio] of ratios) {
-    assert.ok(ratio < 8, `${name}: 4 times the input took ${ratio.toFixed(1)} times as long (linear is about 4, quadratic 16)`);
+  // Time per file at 16x size over time per file at 1x size is factor ** exponent.
+  const exponents = names.map((name) => {
+    const growth = (factor * best.get(name)[`${factor}x`]) / best.get(name)['1x'];
+    return [name, Math.log(growth) / Math.log(factor), growth];
+  });
+  t.diagnostic(`growth exponent (1 linear, 2 quadratic): ${exponents.map(([name, e]) => `${name} ${e.toFixed(2)}`).join(', ')}`);
+  for (const [name, exponent, growth] of exponents) {
+    assert.ok(exponent < 1.5, `${name}: ${factor} times the input took ${growth.toFixed(0)} times as long, a growth exponent of ${exponent.toFixed(2)} (linear is 1, quadratic 2)`);
   }
 });
 

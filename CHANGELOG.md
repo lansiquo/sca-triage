@@ -24,8 +24,10 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   tests; internal detail moved to ARCHITECTURE.md. [W-sca-triage-13]
 - Tests: the hostile-input (no ReDoS) test no longer fails on a slow or busy CI runner. It required
   the scan to finish in under 1000 ms and took 1150 ms on one Windows runner for a README-only
-  commit. It now checks growth instead: 4 times the input must take well under 8 times as long
-  (linear is about 4, quadratic 16), so a real slowdown still fails it. [W-sca-triage-16]
+  commit. It now checks growth instead: 16 times the input must take less than 64 times as long, a
+  growth exponent below 1.5 (linear is 16 times, quadratic 256), measured in CPU time where the
+  platform counts it finely, so a real slowdown still fails it and a busy runner does not.
+  [W-sca-triage-16]
 
 ## [1.3.0] - 2026-11-12
 
