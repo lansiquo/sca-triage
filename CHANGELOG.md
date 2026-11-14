@@ -33,6 +33,17 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   some runs does not fail it, as long as at least one run per size is not slowed. A planted
   quadratic rescan of the text fails it; a slowdown that adds only a little super-linear work can
   stay below 1.5 and pass. [W-sca-triage-16]
+- Tests: the hostile-input (no ReDoS) test passed a large slowdown whose extra work is capped per
+  position, because such work grows linearly with the input. Letting the comment gap of the
+  scanner's fallback patterns run 40,000 characters instead of 400 made the old test take 3.6 s
+  instead of under 0.3 s, which its 1000 ms limit caught, but the growth check passed it at an
+  exponent of 1.26. Beside the growth check, each input now has an absolute time ceiling: the
+  fastest run of each size must take under 4500 ms per MB per scan, about 10 times the old limit
+  (1000 ms for 2.2 MB). Unchanged, the slowest input took about 150 ms per MB on Linux; with the
+  40,000-character gap it took about 11,800 ms per MB, and the test now fails. A run over the
+  ceiling is retried like one over the growth limit, up to 7 runs per size, so one slowed run does
+  not fail the test. A slowdown below both the growth limit and the ceiling still passes.
+  [W-sca-triage-20]
 
 ## [1.3.0] - 2026-11-12
 

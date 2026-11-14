@@ -88,12 +88,21 @@ const { specifiers } = await import(
 // - repeated until it lasts: the scan count, the same on both sides, doubles until the fastest run
 //   of each side takes at least 250 ms (at most 4096 scans), so a clock that ticks only every 16 or
 //   32 ms cannot give a zero, and one 32 ms tick is at most 13% of a counted run;
-// - the fastest of up to 7 runs per side, the sides taking turns, stopping at the first growth
-//   below 1.5: a busy CPU or a pause only lengthens the runs it falls in, so it cannot fail the
-//   test as long as at least one run per side is not slowed. (Process CPU time also counts the
-//   engine's garbage collector threads; with it, one input reached 1.48 on Windows with Node 20.)
+// - the fastest of up to 7 runs per side, the sides taking turns, stopping at the first run with
+//   growth below 1.5 and both sides under the time ceiling below: a busy CPU or a pause only
+//   lengthens the runs it falls in, so it cannot fail the test as long as at least one run per
+//   side is not slowed. (Process CPU time also counts the engine's garbage collector threads; with
+//   it, one input reached 1.48 on Windows with Node 20.)
 // It catches strong super-linear growth (a planted quadratic rescan of the text fails it); a
-// slowdown that adds only a little super-linear work can stay below 1.5 and pass.
+// slowdown that adds only a little super-linear work can stay below 1.5. Growth also misses extra
+// work capped per position, which grows linearly however slow it is: letting the comment gap of
+// the fallback patterns run 40,000 characters instead of 400 made the old test, one scan of these
+// inputs at size 300,000 (2.2 MB) with a limit of 1000 ms, take 3.6 s instead of under 0.3 s, at a
+// growth exponent of 1.26. So each input also has an absolute time ceiling: the fastest run of
+// each side must take under 4500 ms per MB (1,000,000 bytes) per scan, about 10 times the old
+// limit (1000 ms for 2.2 MB, about 455 ms per MB). Unchanged, the slowest input (c.js) took about
+// 150 ms per MB on a Linux machine, 30 times below the ceiling; with the 40,000-character gap it
+// took about 11,800 ms per MB and failed. A slowdown below both 1.5 and the ceiling passes.
 test('stays linear on hostile input (no ReDoS)', (t) => {
   const dir = tempProject(t);
   const hostile = (size) => ({
@@ -112,6 +121,7 @@ test('stays linear on hostile input (no ReDoS)', (t) => {
     'i.jsx': '>a/*<*/' + 'a=/*'.repeat(size / 24) + '*/' + '/**/'.repeat(size / 24) + 'b.createRequire(',
   });
   const factor = 16;
+  const ceiling = 4500; // ms per MB of one scan, about 10 times the old limit (see above)
   const small = hostile(37_500);
   const large = hostile(37_500 * factor);
   const names = Object.keys(small);
@@ -146,6 +156,8 @@ test('stays linear on hostile input (no ReDoS)', (t) => {
     let repeat = 1;
     let best;
     let runs;
+    // Milliseconds per MB of one scan, at the slower side's fastest run, for the ceiling.
+    const msPerMB = (best) => Math.max(...Object.values(best)) / repeat / (Buffer.byteLength(large[name]) / 1e6);
     measure: for (;;) {
       best = { '1x': Infinity, [`${factor}x`]: Infinity };
       runs = {};
@@ -155,7 +167,7 @@ test('stays linear on hostile input (no ReDoS)', (t) => {
           for (let r = 0; r < repeat; r++) scan(sides[side]);
           const took = performance.now() - before;
           assert.ok(Number.isFinite(took) && took >= 0, `${name}: the clock gave an invalid duration (${took})`);
-          // Only a guard against a hang; the growth below is the check.
+          // Only a guard against a hang; the growth and the ceiling below are the checks.
           assert.ok(took < 30_000, `${name} at ${side} size took over 30 s`);
           best[side] = Math.min(best[side], took);
           runs[side] = (runs[side] ?? 0) + 1;
@@ -170,21 +182,23 @@ test('stays linear on hostile input (no ReDoS)', (t) => {
             continue measure;
           }
         }
-        if (growth(best) < 1.5) break measure;
+        if (growth(best) < 1.5 && msPerMB(best) < ceiling) break measure;
       }
       break;
     }
-    // The fastest of up to 7 runs per side, taking turns; it stops at the first growth below 1.5.
+    // The fastest of up to 7 runs per side, taking turns; it stops at the first run with growth
+    // below 1.5 and both sides under the ceiling.
     for (const [side, ms] of Object.entries(best)) {
       assert.ok(ms > 0 && Number.isFinite(ms), `${name}: fastest ${side} run took ${ms} ms, not a valid duration`);
     }
     const exponent = growth(best);
     assert.ok(Number.isFinite(exponent) && exponent > 0, `${name}: growth exponent ${exponent} is not a valid measurement, it must be a number above 0 (fastest runs: ${JSON.stringify(best)} ms)`);
-    exponents.push([name, exponent, `${repeat} scans, ${runs['1x']}+${runs[`${factor}x`]} runs`]);
+    exponents.push([name, exponent, msPerMB(best), `${repeat} scans, ${runs['1x']}+${runs[`${factor}x`]} runs`]);
   }
-  t.diagnostic(`growth exponent (1 linear, 2 quadratic): ${exponents.map(([name, e, how]) => `${name} ${e.toFixed(2)} (${how})`).join(', ')}`);
-  for (const [name, exponent] of exponents) {
+  t.diagnostic(`growth exponent (1 linear, 2 quadratic) and ms per MB of one scan (ceiling ${ceiling}): ${exponents.map(([name, e, ms, how]) => `${name} ${e.toFixed(2)} ${ms.toFixed(0)} (${how})`).join(', ')}`);
+  for (const [name, exponent, ms] of exponents) {
     assert.ok(exponent < 1.5, `${name}: ${factor} times the input took ${(factor ** exponent).toFixed(0)} times as long, a growth exponent of ${exponent.toFixed(2)} (linear is 1, quadratic 2)`);
+    assert.ok(ms < ceiling, `${name}: one scan took ${ms.toFixed(0)} ms per MB, over the time ceiling of ${ceiling} ms per MB (about 10 times the old limit of 1000 ms for 2.2 MB)`);
   }
 });
 
