@@ -8,6 +8,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Changed
+- **README: shorter and easier to follow.** It is now about half as long, at under 900 words. It
+  opens with what the tool does, its status, the npm and GitHub Action quick start, the common
+  commands, ranking, a short `fix` walkthrough, exit codes and the main limits. The detail moved,
+  unchanged in meaning, to two new pages: `docs/usage.md` has every option, the reachability
+  levels, `fix` step by step with its failure handling, the full exit-code list and the full
+  limits, including registry retries and `SCA_TRIAGE_REGISTRY`; `docs/example-nodegoat.md` has the
+  OWASP NodeGoat run with its commands and output. No behavior changed. [W-sca-triage-22]
 - Releases: a GitHub workflow now publishes each stable release to npm when its GitHub release is
   published, with npm trusted publishing (no stored token) and provenance, so npm shows the commit
   a version was built from. Stable means a `vX.Y.Z` tag (SemVer, no leading zeros) that is not a
